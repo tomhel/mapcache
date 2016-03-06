@@ -165,6 +165,8 @@ static int _mapcache_cache_riak_has_tile(mapcache_context *ctx, mapcache_cache *
 
 static void _mapcache_cache_riak_delete(mapcache_context *ctx, mapcache_cache *pcache, mapcache_tile *tile) {
     int error;
+    int connect_error = RIACK_SUCCESS;
+    int retries = 3;
     riack_string key;
     riack_client *client;
     riack_del_properties properties;
@@ -183,7 +185,23 @@ static void _mapcache_cache_riak_delete(mapcache_context *ctx, mapcache_cache *p
 
     properties.rw_use = 1;
     properties.rw = (4294967295 - 3);	// Special value meaning "ALL"
-    error = riack_delete_ext(client, &cache->bucket, &cache->bucket_type, &key, &properties, 0);
+
+    do
+    {
+        error = riack_delete_ext(client, &cache->bucket, &cache->bucket_type, &key, &properties, 0);
+        if (error != RIACK_SUCCESS) {
+            ctx->log(ctx, MAPCACHE_WARN, "Retry %d in riak_delete for tile %s from cache %s due to error %d", (4-retries), key.value, cache->cache.name, error);
+            for (connect_error = riack_reconnect(client);
+                 connect_error != RIACK_SUCCESS && retries > 0;
+                 connect_error = riack_reconnect(client))
+            {
+              --retries;
+            }
+
+            --retries;
+        }
+    }
+    while (error != RIACK_SUCCESS && retries >= 0);
 
     mapcache_connection_pool_release_connection(ctx,pc);
 
