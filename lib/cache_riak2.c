@@ -116,6 +116,7 @@ static char* string_from_template(mapcache_context *ctx, mapcache_tile *tile, ch
 
 static int _mapcache_cache_riak_has_tile(mapcache_context *ctx, mapcache_cache *pcache, mapcache_tile *tile) {
     int error;
+    int connect_error = RIACK_SUCCESS;
     int retries = 3;
     riack_string key,bucket,bucket_type,*pbucket_type = NULL;
     riack_get_object *obj;
@@ -155,9 +156,9 @@ static int _mapcache_cache_riak_has_tile(mapcache_context *ctx, mapcache_cache *
         error = riack_get_ext(client, &bucket, &key, 0, pbucket_type, &obj, 0);
         if (error != RIACK_SUCCESS) {
             ctx->log(ctx, MAPCACHE_WARN, "Retry %d in riak_has_tile for tile %s from cache %s due to error %d", (4-retries), key.value, cache->cache.name, error);
-            for (error = riack_reconnect(client);
-                 error != RIACK_SUCCESS && retries > 0;
-                 error = riack_reconnect(client))
+            for (connect_error = riack_reconnect(client);
+                 connect_error != RIACK_SUCCESS && retries > 0;
+                 connect_error = riack_reconnect(client))
             {
               --retries;
             }
