@@ -315,6 +315,13 @@ static int _mapcache_cache_riak_get(mapcache_context *ctx, mapcache_cache *pcach
     tile->encoded_data = mapcache_buffer_create(0, ctx->pool);
     mapcache_buffer_append(tile->encoded_data, obj->object.content[0].data_len, obj->object.content[0].data);
 
+    // Get modified time
+    if (obj->object.content[0].last_modified_present && obj->object.content[0].last_modified_usecs_present) {
+        tile->mtime = apr_time_make(obj->object.content[0].last_modified, obj->object.content[0].last_modified_usecs);
+    } else if (obj->object.content[0].last_modified_present) {
+        tile->mtime = apr_time_make(obj->object.content[0].last_modified, 0);
+    }
+
     riack_free_get_object_p(client, &obj);    // riack_get allocates the returned object so we need to deallocate it.
 
     mapcache_connection_pool_release_connection(ctx,pc);
