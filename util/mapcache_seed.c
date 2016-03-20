@@ -332,7 +332,7 @@ int ogr_features_intersect_tile(mapcache_context *ctx, mapcache_tile *tile)
 cmd examine_tile(mapcache_context *ctx, mapcache_tile *tile)
 {
   int action = MAPCACHE_CMD_SKIP;
-  int tile_exists;
+  int tile_exists, error;
 
 #ifdef USE_CLIPPERS
   /* check we are in the requested features before checking the tile */
@@ -378,7 +378,8 @@ cmd examine_tile(mapcache_context *ctx, mapcache_tile *tile)
   /* if the tile exists and a time limit was specified, check the tile modification date */
   if(tile_exists) {
     if(age_limit) {
-      if(mapcache_cache_tile_get(ctx,tileset->_cache, tile) == MAPCACHE_SUCCESS) {
+      error = mapcache_cache_tile_get(ctx,tileset->_cache, tile);
+      if(error == MAPCACHE_SUCCESS) {
         if(tile->mtime && tile->mtime<age_limit) {
           /* the tile modification time is older than the specified limit */
           if(mode == MAPCACHE_CMD_SEED || mode == MAPCACHE_CMD_TRANSFER) {
@@ -396,6 +397,8 @@ cmd examine_tile(mapcache_context *ctx, mapcache_tile *tile)
             action = MAPCACHE_CMD_DELETE;
           }
         }
+      } else if (error == MAPCACHE_CACHE_MISS && mode == MAPCACHE_CMD_SEED) {
+        action = mode;
       } else {
         //BUG: tile_exists returned true, but tile_get returned a failure. not sure what to do.
         action = MAPCACHE_CMD_SKIP;
