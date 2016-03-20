@@ -340,7 +340,7 @@ cmd examine_tile(mapcache_context *ctx, mapcache_tile *tile)
     return MAPCACHE_CMD_STOP_RECURSION;
 #endif
 
-  if(force) {
+  if(force && mode != MAPCACHE_CMD_DELETE) {
     tile_exists = 0;
   } else {
     int i;
