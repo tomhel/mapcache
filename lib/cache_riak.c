@@ -51,6 +51,7 @@ struct mapcache_cache_riak {
    mapcache_cache cache;
    char *host;
    int port;
+   int keep_alive;
    RIACK_STRING bucket;
 };
 
@@ -70,6 +71,7 @@ void mapcache_riak_connection_constructor(mapcache_context *ctx, void **conn_, v
 
     options.recv_timeout_ms = 2000;
     options.send_timeout_ms = 2000;
+    options.keep_alive_enabled = cache->keep_alive;
     if (riack_connect(client, cache->host, cache->port, &options) != RIACK_SUCCESS) {
         riack_free(client);
         ctx->set_error(ctx,500,"failed to riack_connect()");
@@ -272,6 +274,7 @@ static int _mapcache_cache_riak_get(mapcache_context *ctx, mapcache_cache *pcach
 
     if (error != RIACK_SUCCESS)
     {
+        riack_free_get_object(client, &obj);    // riack_get allocates the returned object so we need to deallocate it.
         if (connect_error != RIACK_SUCCESS)
             mapcache_connection_pool_invalidate_connection(ctx,pc);
         else
@@ -409,7 +412,7 @@ static void _mapcache_cache_riak_set(mapcache_context *ctx, mapcache_cache *pcac
  * \private \memberof mapcache_cache_riak
  */
 static void _mapcache_cache_riak_configuration_parse_xml(mapcache_context *ctx, ezxml_t node, mapcache_cache *cache, mapcache_cfg *config) {
-    ezxml_t cur_node,xhost,xport,xbucket;
+    ezxml_t cur_node,xhost,xport,xbucket,xkeep_alive;
     mapcache_cache_riak *dcache = (mapcache_cache_riak*)cache;
     int servercount = 0;
 
@@ -431,6 +434,7 @@ static void _mapcache_cache_riak_configuration_parse_xml(mapcache_context *ctx, 
     xhost = ezxml_child(cur_node, "host");   /* Host should contain just server */
     xport = ezxml_child(cur_node, "port");
     xbucket = ezxml_child(cur_node, "bucket");
+    xkeep_alive = ezxml_child(cur_node, "keep_alive");
 
     if (!xhost || !xhost->txt || ! *xhost->txt) {
         ctx->set_error(ctx, 400, "cache %s: <server> with no <host>", cache->name);
@@ -461,6 +465,9 @@ static void _mapcache_cache_riak_configuration_parse_xml(mapcache_context *ctx, 
         }
         dcache->bucket.len = strlen(dcache->bucket.value);
     }
+    if (xkeep_alive) {
+        dcache->keep_alive = 1;
+    }
 }
 
 /**
@@ -490,6 +497,7 @@ mapcache_cache* mapcache_cache_riak_create(mapcache_context *ctx) {
     cache->cache.configuration_post_config = _mapcache_cache_riak_configuration_post_config;
     cache->host = NULL;
     cache->port = 8087;	// Default RIAK port used for protobuf
+    cache->keep_alive = 0;
 
     return (mapcache_cache*)cache;
 }
