@@ -51,10 +51,18 @@ typedef struct mapcache_cache_riak mapcache_cache_riak;
 struct mapcache_cache_riak {
    mapcache_cache cache;
    char *host;
+   char *ciphers;
+   char *ca_file;
+   char *cert_file;
+   char *key_file;
    int port;
    char *key_template;
    char *bucket_template;
    char *bucket_type_template;
+   int keep_alive;
+   int session_timeout;
+   riack_string *user;
+   riack_string *password;
 };
 
 struct riak_conn_params {
@@ -64,6 +72,9 @@ struct riak_conn_params {
 void mapcache_riak_connection_constructor(mapcache_context *ctx, void **conn_, void *params) {
     mapcache_cache_riak *cache = ((struct riak_conn_params*)params)->cache;
     riack_connection_options options;
+#ifdef RIACK_HAVE_SECURITY
+    riack_security_options security;
+#endif
     riack_client *client = riack_new_client(0);
 
     if (client == NULL) {
@@ -73,11 +84,37 @@ void mapcache_riak_connection_constructor(mapcache_context *ctx, void **conn_, v
 
     options.recv_timeout_ms = 2000;
     options.send_timeout_ms = 2000;
+    options.keep_alive_enabled = cache->keep_alive;
+
     if (riack_connect(client, cache->host, cache->port, &options) != RIACK_SUCCESS) {
         riack_free(client);
         ctx->set_error(ctx,500,"failed to riack_connect()");
         return;
     }
+
+#ifdef RIACK_HAVE_SECURITY
+    if (cache->user) {
+        /* If user is set start TLS and perform authentication */
+        riack_init_security_options(&security);
+        security.ca_file = cache->ca_file;
+        security.key_file = cache->key_file;
+        security.cert_file = cache->cert_file;
+        security.ciphers = cache->ciphers;
+        security.session_timeout = cache->session_timeout;
+
+        if (riack_start_tls(client, &security) != RIACK_SUCCESS) {
+            riack_free(client);
+            ctx->set_error(ctx,500,"failed to riack_start_tls(), check certificates, ciphers");
+            return;
+        }
+
+        if (riack_auth(client, cache->user, cache->password) != RIACK_SUCCESS) {
+            riack_free(client);
+            ctx->set_error(ctx,500,"failed to riack_auth(), check user, password");
+            return;
+        }
+    }
+#endif
 
     if (riack_ping(client) != RIACK_SUCCESS) {
         riack_free(client);
@@ -119,7 +156,7 @@ static int _mapcache_cache_riak_has_tile(mapcache_context *ctx, mapcache_cache *
     int connect_error = RIACK_SUCCESS;
     int retries = 3;
     riack_string key,bucket,bucket_type,*pbucket_type = NULL;
-    riack_get_object *obj;
+    riack_get_object *obj = NULL;
     riack_client *client;
     mapcache_pooled_connection *pc;
     mapcache_cache_riak *cache = (mapcache_cache_riak*)pcache;
@@ -257,7 +294,7 @@ static int _mapcache_cache_riak_get(mapcache_context *ctx, mapcache_cache *pcach
     int connect_error = RIACK_SUCCESS;
     int retries = 3;
     riack_string key,bucket,bucket_type,*pbucket_type = NULL;
-    riack_get_object *obj;
+    riack_get_object *obj = NULL;
     riack_get_properties properties;
     riack_client *client;
     mapcache_pooled_connection *pc;
@@ -320,6 +357,7 @@ static int _mapcache_cache_riak_get(mapcache_context *ctx, mapcache_cache *pcach
 
     if (error != RIACK_SUCCESS)
     {
+        riack_free_get_object_p(client, &obj);    // riack_get allocates the returned object so we need to deallocate it.
         if (connect_error != RIACK_SUCCESS)
             mapcache_connection_pool_invalidate_connection(ctx,pc);
         else
@@ -370,7 +408,6 @@ static void _mapcache_cache_riak_set(mapcache_context *ctx, mapcache_cache *pcac
     int retries = 3;
     riack_object object;
     riack_content content;
-    riack_put_properties properties;
     riack_client *client;
     riack_string bucket,bucket_type,*pbucket_type = NULL;
     mapcache_pooled_connection *pc;
@@ -440,7 +477,7 @@ static void _mapcache_cache_riak_set(mapcache_context *ctx, mapcache_cache *pcac
     {
         error = riack_put_ext(client, &object, pbucket_type, 0, &properties, 0);
         if (error != RIACK_SUCCESS) {
-            ctx->log(ctx, MAPCACHE_WARN, "Retry %d in riak_set for tile %s from cache %s due to eror %d", (4 - retries), key, cache->cache.name, error);
+            ctx->log(ctx, MAPCACHE_WARN, "Retry %d in riak_set for tile %s from cache %s due to error %d", (4 - retries), key, cache->cache.name, error);
             for (connect_error = riack_reconnect(client);
                  connect_error != RIACK_SUCCESS && retries > 0;
                  connect_error = riack_reconnect(client))
@@ -468,7 +505,7 @@ static void _mapcache_cache_riak_set(mapcache_context *ctx, mapcache_cache *pcac
  * \private \memberof mapcache_cache_riak
  */
 static void _mapcache_cache_riak_configuration_parse_xml(mapcache_context *ctx, ezxml_t node, mapcache_cache *cache, mapcache_cfg *config) {
-    ezxml_t cur_node,xhost,xport,xbucket,xkey,xbucket_type;
+    ezxml_t cur_node,xhost,xport,xbucket,xkey,xbucket_type,xuser,xpassword,xca_file,xkey_file,xcert_file,xkeep_alive,xsession_timeout,xciphers;
     mapcache_cache_riak *dcache = (mapcache_cache_riak*)cache;
     int servercount = 0;
 
@@ -492,6 +529,14 @@ static void _mapcache_cache_riak_configuration_parse_xml(mapcache_context *ctx, 
     xbucket = ezxml_child(cur_node, "bucket");
     xkey = ezxml_child(cur_node, "key");
     xbucket_type = ezxml_child(cur_node, "bucket_type");
+    xuser = ezxml_child(cur_node, "user");
+    xpassword = ezxml_child(cur_node, "password");
+    xca_file = ezxml_child(cur_node, "ca_file");
+    xcert_file = ezxml_child(cur_node, "cert_file");
+    xkey_file = ezxml_child(cur_node, "key_file");
+    xkeep_alive = ezxml_child(cur_node, "keep_alive");
+    xsession_timeout = ezxml_child(cur_node, "session_timeout");
+    xciphers = ezxml_child(cur_node, "ciphers");
 
     if (!xhost || !xhost->txt || ! *xhost->txt) {
         ctx->set_error(ctx, 400, "cache %s: <server> with no <host>", cache->name);
@@ -520,6 +565,45 @@ static void _mapcache_cache_riak_configuration_parse_xml(mapcache_context *ctx, 
 
     if (xbucket_type && xbucket_type->txt && *xbucket_type->txt) {
         dcache->bucket_type_template = apr_pstrdup(ctx->pool, xbucket_type->txt);
+    }
+
+    if (xuser && xuser->txt && *xuser->txt) {
+        dcache->user = apr_palloc(ctx->pool, sizeof(riack_string));
+        dcache->user->value = apr_pstrdup(ctx->pool, xuser->txt);
+        dcache->user->len = strlen(dcache->user->value);
+    }
+
+    if (xpassword && xpassword->txt && *xpassword->txt) {
+        dcache->password = apr_palloc(ctx->pool, sizeof(riack_string));
+        dcache->password->value = apr_pstrdup(ctx->pool, xpassword->txt);
+        dcache->password->len = strlen(dcache->password->value);
+    }
+
+    if (xca_file && xca_file->txt && *xca_file->txt) {
+        dcache->ca_file = apr_pstrdup(ctx->pool, xca_file->txt);
+    }
+
+    if (xcert_file && xcert_file->txt && *xcert_file->txt) {
+        dcache->cert_file = apr_pstrdup(ctx->pool, xcert_file->txt);
+    }
+
+    if (xkey_file && xkey_file->txt && *xkey_file->txt) {
+        dcache->key_file = apr_pstrdup(ctx->pool, xkey_file->txt);
+    }
+
+    if (xciphers && xciphers->txt && *xciphers->txt) {
+        dcache->ciphers = apr_pstrdup(ctx->pool, xciphers->txt);
+    }
+
+    if (xsession_timeout && xsession_timeout->txt && *xsession_timeout->txt) {
+        dcache->session_timeout = atoi(xsession_timeout->txt);
+        if (dcache->session_timeout <= 0) {
+            ctx->set_error(ctx, 400, "cache %s: session_timeout must be a positive number", cache->name);
+        }
+    }
+
+    if (xkeep_alive) {
+        dcache->keep_alive = 1;
     }
 }
 
@@ -553,6 +637,15 @@ mapcache_cache* mapcache_cache_riak_create(mapcache_context *ctx) {
     cache->bucket_template = NULL;
     cache->key_template = NULL;
     cache->bucket_type_template = NULL;
+    cache->keep_alive = 0;
+    // Security settings for Riak 2+
+    cache->user = NULL;
+    cache->password = NULL;
+    cache->ca_file = NULL;
+    cache->cert_file = NULL;
+    cache->key_file = NULL;
+    cache->ciphers = NULL;
+    cache->session_timeout = 0; // TLS session timeout in seconds, 0 == default.
 
     return (mapcache_cache*)cache;
 }
