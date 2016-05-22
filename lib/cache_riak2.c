@@ -60,6 +60,8 @@ struct mapcache_cache_riak {
    char *bucket_template;
    char *bucket_type_template;
    int keep_alive;
+   int r;
+   int w;
    int session_timeout;
    riack_string *user;
    riack_string *password;
@@ -158,8 +160,11 @@ static int _mapcache_cache_riak_has_tile(mapcache_context *ctx, mapcache_cache *
     riack_string key,bucket,bucket_type,*pbucket_type = NULL;
     riack_get_object *obj = NULL;
     riack_client *client;
+    riack_get_properties properties;
     mapcache_pooled_connection *pc;
     mapcache_cache_riak *cache = (mapcache_cache_riak*)pcache;
+
+    memset(&properties, 0, sizeof(riack_get_properties));
 
     key.value = mapcache_util_get_tile_key(ctx, tile, cache->key_template, " \r\n\t\f\e\a\b", "#");
     if (GC_HAS_ERROR(ctx)) {
@@ -188,9 +193,15 @@ static int _mapcache_cache_riak_has_tile(mapcache_context *ctx, mapcache_cache *
     }
     client = pc->connection;
 
+    if (cache->r > 0) {
+        /* Override bucket defaults */
+        properties.r = cache->r;
+        properties.r_use = 1;
+    }
+
     do
     {
-        error = riack_get_ext(client, &bucket, &key, 0, pbucket_type, &obj, 0);
+        error = riack_get_ext(client, &bucket, &key, &properties, pbucket_type, &obj, 0);
         if (error != RIACK_SUCCESS) {
             ctx->log(ctx, MAPCACHE_WARN, "Retry %d in riak_has_tile for tile %s from cache %s due to error %d", (4-retries), key.value, cache->cache.name, error);
             for (connect_error = riack_reconnect(client);
@@ -302,12 +313,6 @@ static int _mapcache_cache_riak_get(mapcache_context *ctx, mapcache_cache *pcach
 
     memset(&properties, 0, sizeof(riack_get_properties));
 
-	//Use Buckets defaults instead of setting the read/write attributes
-    /*
-	properties.r_use = 1;
-    properties.r = 1;
-	*/
-
     key.value = mapcache_util_get_tile_key(ctx, tile, cache->key_template, " \r\n\t\f\e\a\b", "#");
     if (GC_HAS_ERROR(ctx)) {
         return MAPCACHE_FAILURE;
@@ -334,6 +339,12 @@ static int _mapcache_cache_riak_get(mapcache_context *ctx, mapcache_cache *pcach
         return MAPCACHE_FAILURE;
     }
     client = pc->connection;
+
+    if (cache->r > 0) {
+        /* Override bucket defaults */
+        properties.r = cache->r;
+        properties.r_use = 1;
+    }
 
     // If we get an error it is advised that we call reconnect.  It also appears
     // that every now and then we get an error and need to retry once again to
@@ -410,20 +421,13 @@ static void _mapcache_cache_riak_set(mapcache_context *ctx, mapcache_cache *pcac
     riack_content content;
     riack_client *client;
     riack_string bucket,bucket_type,*pbucket_type = NULL;
+    riack_put_properties properties;
     mapcache_pooled_connection *pc;
     mapcache_cache_riak *cache = (mapcache_cache_riak*)pcache;
 
     memset(&content, 0, sizeof(riack_content));
     memset(&object, 0, sizeof(riack_object));
     memset(&properties, 0, sizeof(riack_put_properties));
-
-	//Use Buckets defaults instead of setting the read/write attributes
-	/*
-    properties.w_use = 1;
-    properties.w = 1;
-
-    properties.dw_use = 1;
-    properties.dw = 0;*/
 
     key = mapcache_util_get_tile_key(ctx, tile, cache->key_template, " \r\n\t\f\e\a\b", "#");
     GC_CHECK_ERROR(ctx);
@@ -469,6 +473,15 @@ static void _mapcache_cache_riak_set(mapcache_context *ctx, mapcache_cache *pcac
     content.content_type.len = content_type?strlen(content_type):0;
     content.data = (uint8_t*)tile->encoded_data->buf;
     content.data_len = tile->encoded_data->size;
+
+    if (cache->w > 0) {
+        /* Override bucket defaults */
+        properties.w = cache->w;
+        properties.w_use = 1;
+        /* Set dw to w, as dw is not demoted to w by default */
+        properties.dw = cache->w;
+        properties.dw_use = 1;
+    }
 
     // If we get an error it is advised that we call reconnect.  It also appears
     // that every now and then we get an error and need to retry once again to
@@ -556,7 +569,25 @@ static void _mapcache_cache_riak_configuration_parse_xml(mapcache_context *ctx, 
         ctx->set_error(ctx, 400, "cache %s: <server> with no <bucket>", cache->name);
         return;
     } else {
+        char *r = NULL;
+        char *w = NULL;
         dcache->bucket_template = apr_pstrdup(ctx->pool, xbucket->txt);
+        r = (char*)ezxml_attr(xbucket ,"r");
+        if (r) {
+            dcache->r = atoi(r);
+            if (dcache->r <= 0) {
+                ctx->set_error(ctx, 400, "cache %s: r value must be positive", cache->name);
+                return;
+            }
+        }
+        w = (char*)ezxml_attr(xbucket ,"w");
+        if (w) {
+            dcache->w = atoi(w);
+            if (dcache->w <= 0) {
+                ctx->set_error(ctx, 400, "cache %s: w value must be positive", cache->name);
+                return;
+            }
+        }
     }
 
     if(xkey && xkey->txt && *xkey->txt) {
@@ -638,6 +669,8 @@ mapcache_cache* mapcache_cache_riak_create(mapcache_context *ctx) {
     cache->key_template = NULL;
     cache->bucket_type_template = NULL;
     cache->keep_alive = 0;
+    cache->r = 0; // 0 == use bucket default
+    cache->w = 0; // 0 == use bucket default
     // Security settings for Riak 2+
     cache->user = NULL;
     cache->password = NULL;
