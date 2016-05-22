@@ -210,7 +210,11 @@ static int _mapcache_cache_riak_has_tile(mapcache_context *ctx, mapcache_cache *
 
     if (error != RIACK_SUCCESS) {
         riack_free_get_object_p(client, &obj);    // riack_get allocates the returned object so we need to deallocate it.
-        mapcache_connection_pool_invalidate_connection(ctx,pc);
+        if (connect_error != RIACK_SUCCESS)
+            mapcache_connection_pool_invalidate_connection(ctx,pc);
+        else
+            mapcache_connection_pool_release_connection(ctx,pc);
+
         ctx->set_error(ctx, 500, "riak: failed to get key %s: %d", key.value, error);
         return MAPCACHE_FALSE;
     }
@@ -271,7 +275,10 @@ static void _mapcache_cache_riak_delete(mapcache_context *ctx, mapcache_cache *p
     }
     while (error != RIACK_SUCCESS && retries >= 0);
 
-    mapcache_connection_pool_release_connection(ctx,pc);
+    if (connect_error != RIACK_SUCCESS)
+        mapcache_connection_pool_invalidate_connection(ctx,pc);
+    else
+        mapcache_connection_pool_release_connection(ctx,pc);
 
     if (error != RIACK_SUCCESS) {
         ctx->set_error(ctx, 500, "riak: failed to delete key %s: %d", key.value, error);
