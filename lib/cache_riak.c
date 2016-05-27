@@ -56,6 +56,7 @@ struct mapcache_cache_riak {
    int keep_alive;
    int r;
    int w;
+   int detect_blank;
 };
 
 struct riak_conn_params {
@@ -331,9 +332,17 @@ static int _mapcache_cache_riak_get(mapcache_context *ctx, mapcache_cache *pcach
         return MAPCACHE_CACHE_MISS;
     }
 
-    // Copy the data into the buffer
     tile->encoded_data = mapcache_buffer_create(0, ctx->pool);
-    mapcache_buffer_append(tile->encoded_data, obj.object.content[0].data_len, obj.object.content[0].data);
+
+    if(((char*)(obj.object.content[0].data))[0] == '#' && obj.object.content[0].data_len == 5 &&
+       sizeof("image/mapcache-rgba") - 1 == obj.object.content[0].content_type.len &&
+       !strncmp("image/mapcache-rgba", obj.object.content[0].content_type.value, obj.object.content[0].content_type.len)) {
+        // Create blank tile
+        tile->encoded_data = mapcache_empty_png_decode(ctx, tile->grid_link->grid->tile_sx, tile->grid_link->grid->tile_sy, (unsigned char*)obj.object.content[0].data, &tile->nodata);
+    } else {
+        // Copy the data into the buffer
+        mapcache_buffer_append(tile->encoded_data, obj.object.content[0].data_len, obj.object.content[0].data);
+    }
 
     // Get modified time
     if (obj.object.content[0].last_modified_present && obj.object.content[0].last_modified_usecs_present) {
@@ -357,7 +366,7 @@ static int _mapcache_cache_riak_get(mapcache_context *ctx, mapcache_cache *pcach
  * \sa mapcache_cache::tile_set()
  */
 static void _mapcache_cache_riak_set(mapcache_context *ctx, mapcache_cache *pcache, mapcache_tile *tile) {
-    char *key,*content_type;
+    char *key,*content_type = NULL;
     int error;
     int connect_error = RIACK_SUCCESS;
     int retries = 3;
@@ -392,11 +401,29 @@ static void _mapcache_cache_riak_set(mapcache_context *ctx, mapcache_cache *pcac
     }
     bucket.len = strlen(bucket.value);
 
+    // Blank tile detection
+    if(cache->detect_blank) {
+        if(!tile->raw_image) {
+            tile->raw_image = mapcache_imageio_decode(ctx, tile->encoded_data);
+            GC_CHECK_ERROR(ctx);
+        }
+        if(mapcache_image_blank_color(tile->raw_image) != MAPCACHE_FALSE) {
+            tile->encoded_data = mapcache_buffer_create(5,ctx->pool);
+            ((char*)tile->encoded_data->buf)[0] = '#';
+            memcpy(((char*)tile->encoded_data->buf)+1,tile->raw_image->data,4);
+            tile->encoded_data->size = 5;
+            content_type = "image/mapcache-rgba";
+        }
+    }
+
     if (!tile->encoded_data) {
         tile->encoded_data = tile->tileset->format->write(ctx, tile->raw_image, tile->tileset->format);
         GC_CHECK_ERROR(ctx);
     }
-    content_type = tile->tileset->format?(tile->tileset->format->mime_type?tile->tileset->format->mime_type:NULL):NULL;
+
+    if(!content_type) {
+        content_type = tile->tileset->format?(tile->tileset->format->mime_type?tile->tileset->format->mime_type:NULL):NULL;
+    }
 
     if(!content_type) {
       /* compute the content-type */
@@ -458,7 +485,7 @@ static void _mapcache_cache_riak_set(mapcache_context *ctx, mapcache_cache *pcac
  * \private \memberof mapcache_cache_riak
  */
 static void _mapcache_cache_riak_configuration_parse_xml(mapcache_context *ctx, ezxml_t node, mapcache_cache *cache, mapcache_cfg *config) {
-    ezxml_t cur_node,xhost,xport,xbucket,xkey,xkeep_alive;
+    ezxml_t cur_node,xhost,xport,xbucket,xkey,xkeep_alive,xdetect_blank;
     mapcache_cache_riak *dcache = (mapcache_cache_riak*)cache;
     int servercount = 0;
 
@@ -482,6 +509,7 @@ static void _mapcache_cache_riak_configuration_parse_xml(mapcache_context *ctx, 
     xbucket = ezxml_child(cur_node, "bucket");
     xkey = ezxml_child(cur_node, "key");
     xkeep_alive = ezxml_child(cur_node, "keep_alive");
+    xdetect_blank = ezxml_child(node, "detect_blank");
 
     if (!xhost || !xhost->txt || ! *xhost->txt) {
         ctx->set_error(ctx, 400, "cache %s: <server> with no <host>", cache->name);
@@ -529,6 +557,12 @@ static void _mapcache_cache_riak_configuration_parse_xml(mapcache_context *ctx, 
     if (xkeep_alive) {
         dcache->keep_alive = 1;
     }
+
+    if (xdetect_blank && xdetect_blank->txt && *xdetect_blank->txt) {
+        if(!strcasecmp(xdetect_blank->txt, "true")) {
+            dcache->detect_blank = 1;
+        }
+    }
 }
 
 /**
@@ -563,6 +597,7 @@ mapcache_cache* mapcache_cache_riak_create(mapcache_context *ctx) {
     cache->keep_alive = 0;
     cache->r = 0; // 0 == use bucket default
     cache->w = 0; // 0 == use bucket default
+    cache->detect_blank = 0;
 
     return (mapcache_cache*)cache;
 }
