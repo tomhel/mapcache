@@ -522,7 +522,7 @@ static void _mapcache_cache_riak_configuration_parse_xml(mapcache_context *ctx, 
     xkeep_alive = ezxml_child(cur_node, "keep_alive");
     xsession_timeout = ezxml_child(cur_node, "session_timeout");
     xciphers = ezxml_child(cur_node, "ciphers");
-    xdetect_blank = ezxml_child(cur_node, "detect_blank");
+    xdetect_blank = ezxml_child(node, "detect_blank");
 
     if (!xhost || !xhost->txt || ! *xhost->txt) {
         ctx->set_error(ctx, 400, "cache %s: <server> with no <host>", cache->name);
@@ -646,7 +646,7 @@ static void _mapcache_cache_riak_configuration_parse_xml(mapcache_context *ctx, 
     }
 
     if (xdetect_blank && xdetect_blank->txt && *xdetect_blank->txt) {
-        if(!strcasecmp(cur_node->txt, "true")) {
+        if(!strcasecmp(xdetect_blank->txt, "true")) {
             dcache->detect_blank = 1;
         }
     }
