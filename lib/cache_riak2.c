@@ -347,9 +347,9 @@ static int _mapcache_cache_riak_get(mapcache_context *ctx, mapcache_cache *pcach
         return MAPCACHE_CACHE_MISS;
     }
 
-    if(((char*)(obj->object.content[0].data))[0] == '#' && 
-       !strncmp("image/mapcache-rgba", obj->object.content[0].content_type.value, obj->object.content[0].content_type.len) && 
-       strlen("image/mapcache-rgba") == obj->object.content[0].content_type.len) {
+    if(((char*)(obj->object.content[0].data))[0] == '#' && obj->object.content[0].data_len == 5 &&
+       sizeof("image/mapcache-rgba") - 1 == obj->object.content[0].content_type.len &&
+       !strncmp("image/mapcache-rgba", obj->object.content[0].content_type.value, obj->object.content[0].content_type.len)) {
         // Create blank tile
         tile->encoded_data = mapcache_empty_png_decode(ctx, tile->grid_link->grid->tile_sx, tile->grid_link->grid->tile_sy, (unsigned char*)obj->object.content[0].data, &tile->nodata);
     } else {
