@@ -98,6 +98,52 @@ char *base64_encode(apr_pool_t *pool, const unsigned char *data, size_t input_le
   return encoded_data;
 }
 
+/*
+ * Encode a number using printable ascii characters (33 - 126), not including space (32).
+ * In other words this function will encode the number using base 94.
+ * This is a compact way to store numbers as strings.
+ */
+char *base94ascii_encode(apr_pool_t *pool, int value)
+{
+  // let least significant bit represent sign, 0 = positive, 1 = negative.
+  // this way the size of the number (in bytes) will be evenly distributed around zero.
+
+  char* result;
+  int offset;
+  int size = 1;
+  unsigned int v = abs(value) << 1; // positive number, LSB = 0
+
+  if (value < 0) {
+    // negative number, LSB = 1
+    v |= 0x01;
+  }
+
+  if (v > 0) {
+    // compute length of number in base 94
+    size = (int) floor(log(v) / log(94) + 1);
+  }
+
+  result = apr_pcalloc(pool, size + 1);
+  offset = size;
+
+  do {
+    result[--offset] = (char)(v % 94 + 33);
+  } while (v /= 94);
+
+  return result;
+}
+
+/*
+ * Create ascii key from x, y, z.
+ * Space is used as separator.
+ */
+char *mapcache_util_asciikey_encode(mapcache_context *ctx, int x, int y, int z)
+{
+  char *xx = base94ascii_encode(ctx->pool, x);
+  char *yy = base94ascii_encode(ctx->pool, y);
+  char *zz = base94ascii_encode(ctx->pool, z);
+  return apr_pstrcat(ctx->pool, xx, " ", yy, " ", zz, NULL);
+}
 
 int mapcache_util_extract_int_list(mapcache_context *ctx, const char* cargs,
                                    const char *sdelim, int **numbers, int *numbers_count)
@@ -361,11 +407,16 @@ char* mapcache_util_get_tile_key(mapcache_context *ctx, mapcache_tile *tile, cha
 {
   char *path;
   if(template) {
-    path = mapcache_util_str_replace(ctx->pool, template, "{x}",
+    path = apr_pstrdup(ctx->pool, template);
+
+    if(strstr(path,"{x}"))
+      path = mapcache_util_str_replace(ctx->pool, path, "{x}",
                                      apr_psprintf(ctx->pool, "%d", tile->x));
-    path = mapcache_util_str_replace(ctx->pool, path, "{y}",
+    if(strstr(path,"{y}"))
+      path = mapcache_util_str_replace(ctx->pool, path, "{y}",
                                      apr_psprintf(ctx->pool, "%d", tile->y));
-    path = mapcache_util_str_replace(ctx->pool, path, "{z}",
+    if(strstr(path,"{z}"))
+      path = mapcache_util_str_replace(ctx->pool, path, "{z}",
                                      apr_psprintf(ctx->pool, "%d", tile->z));
     if(strstr(path,"{dim}")) {
       path = mapcache_util_str_replace(ctx->pool, path, "{dim}", mapcache_util_get_tile_dimkey(ctx,tile,sanitized_chars,sanitize_to));
@@ -377,6 +428,10 @@ char* mapcache_util_get_tile_key(mapcache_context *ctx, mapcache_tile *tile, cha
     if(strstr(path,"{ext}"))
       path = mapcache_util_str_replace(ctx->pool, path, "{ext}",
                                        tile->tileset->format ? tile->tileset->format->extension : "png");
+    if(strstr(path,"{asciikey}")) {
+      char *asciikey = mapcache_util_asciikey_encode(ctx, tile->x, tile->y, tile->z);
+      path = mapcache_util_str_replace(ctx->pool,path, "{asciikey}", asciikey);
+    }
   } else {
     char *separator = "/";
     /* we'll concatenate the entries ourself */
