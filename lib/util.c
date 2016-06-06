@@ -99,17 +99,14 @@ char *base64_encode(apr_pool_t *pool, const unsigned char *data, size_t input_le
 }
 
 /*
- * Encode a number using printable ascii characters (33 - 126), not including space (32).
- * In other words this function will encode the number using base 94.
- * This is a compact way to store numbers as strings.
+ * Encode a number to base 94 using printable ascii characters (33 - 126), not including space (32).
  */
-char *base94ascii_encode(apr_pool_t *pool, int value)
+char *mapcache_util_base94ascii_encode(apr_pool_t *pool, int value)
 {
   // let least significant bit represent sign, 0 = positive, 1 = negative.
   // this way the size of the number (in bytes) will be evenly distributed around zero.
 
   char* result;
-  int offset;
   int size = 1;
   unsigned int v = abs(value) << 1; // positive number, LSB = 0
 
@@ -124,25 +121,12 @@ char *base94ascii_encode(apr_pool_t *pool, int value)
   }
 
   result = apr_pcalloc(pool, size + 1);
-  offset = size;
 
   do {
-    result[--offset] = (char)(v % 94 + 33);
+    result[--size] = (char)(v % 94 + 33);
   } while (v /= 94);
 
   return result;
-}
-
-/*
- * Create ascii key from x, y, z.
- * Space is used as separator.
- */
-char *mapcache_util_asciikey_encode(mapcache_context *ctx, int x, int y, int z)
-{
-  char *xx = base94ascii_encode(ctx->pool, x);
-  char *yy = base94ascii_encode(ctx->pool, y);
-  char *zz = base94ascii_encode(ctx->pool, z);
-  return apr_pstrcat(ctx->pool, xx, " ", yy, " ", zz, NULL);
 }
 
 int mapcache_util_extract_int_list(mapcache_context *ctx, const char* cargs,
@@ -402,6 +386,52 @@ char* mapcache_util_get_tile_dimkey(mapcache_context *ctx, mapcache_tile *tile, 
   return key;
 }
 
+char* mapcache_util_quadkey_encode(mapcache_context *ctx, int x, int y, int z) {
+  int i;
+  char *key = apr_pcalloc(ctx->pool, z+1);
+  memset(key,'0',z);
+  for (i = z; i > 0; i--) {
+    int mask = 1 << (i - 1);
+    if ((x & mask) != 0)
+    {
+      key[z - i]++;
+    }
+    if ((y & mask) != 0)
+    {
+      key[z - i] += 2;
+    }
+  }
+  return key;
+}
+
+char *mapcache_util_quadkey64_encode(mapcache_context *ctx, int x, int y, int z)
+{
+   // converts a quadkey (base 4) to base 64. This results in a very compact string representation.
+   // all modulo operations are computed using shifts. This works because 4^3 = 64.
+   char *quadkey = mapcache_util_quadkey_encode(ctx, x, y, z);
+   int i = strlen(quadkey) + 1;
+   int size = (int) ceil(i / 3.0f);
+   // prefix quadkey with '1' so leading zeros are kept
+   char *qk = apr_pstrcat(ctx->pool, "1", quadkey, NULL);
+   char *result = apr_pcalloc(ctx->pool, size + 1);
+
+   // convert to base 64
+   do {
+      char r[] = "000"; //reminder
+      unsigned int j;
+      i-=3;
+      if (i >= 0) {
+         memcpy(r, &qk[i], 3);
+      } else {
+         memcpy(&r[-i], qk, 3+i);
+      }
+      j = strtoul(r, NULL, 4);
+      result[--size] = encoding_table[j];
+   } while (i > 0);
+
+   return result;
+}
+
 char* mapcache_util_get_tile_key(mapcache_context *ctx, mapcache_tile *tile, char *template,
                                  char* sanitized_chars, char *sanitize_to)
 {
@@ -418,6 +448,15 @@ char* mapcache_util_get_tile_key(mapcache_context *ctx, mapcache_tile *tile, cha
     if(strstr(path,"{z}"))
       path = mapcache_util_str_replace(ctx->pool, path, "{z}",
                                      apr_psprintf(ctx->pool, "%d", tile->z));
+    if(strstr(path,"{x_base94}"))
+      path = mapcache_util_str_replace(ctx->pool, path, "{x_base94}",
+                                     apr_psprintf(ctx->pool, "%s", mapcache_util_base94ascii_encode(ctx->pool, tile->x)));
+    if(strstr(path,"{y_base94}"))
+      path = mapcache_util_str_replace(ctx->pool, path, "{y_base94}",
+                                     apr_psprintf(ctx->pool, "%s", mapcache_util_base94ascii_encode(ctx->pool, tile->y)));
+    if(strstr(path,"{z_base94}"))
+      path = mapcache_util_str_replace(ctx->pool, path, "{z_base94}",
+                                     apr_psprintf(ctx->pool, "%s", mapcache_util_base94ascii_encode(ctx->pool, tile->z)));
     if(strstr(path,"{dim}")) {
       path = mapcache_util_str_replace(ctx->pool, path, "{dim}", mapcache_util_get_tile_dimkey(ctx,tile,sanitized_chars,sanitize_to));
     }
@@ -428,9 +467,13 @@ char* mapcache_util_get_tile_key(mapcache_context *ctx, mapcache_tile *tile, cha
     if(strstr(path,"{ext}"))
       path = mapcache_util_str_replace(ctx->pool, path, "{ext}",
                                        tile->tileset->format ? tile->tileset->format->extension : "png");
-    if(strstr(path,"{asciikey}")) {
-      char *asciikey = mapcache_util_asciikey_encode(ctx, tile->x, tile->y, tile->z);
-      path = mapcache_util_str_replace(ctx->pool,path, "{asciikey}", asciikey);
+    if(strstr(path,"{quadkey}")) {
+      char *key = mapcache_util_quadkey_encode(ctx, tile->x, tile->y, tile->z + 1);
+      path = mapcache_util_str_replace(ctx->pool,path, "{quadkey}", key);
+    }
+    if(strstr(path,"{quadkey64}")) {
+      char *key = mapcache_util_quadkey64_encode(ctx, tile->x, tile->y, tile->z + 1);
+      path = mapcache_util_str_replace(ctx->pool,path, "{quadkey64}", key);
     }
   } else {
     char *separator = "/";
