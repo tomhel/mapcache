@@ -432,6 +432,15 @@ char *mapcache_util_quadkey64_encode(mapcache_context *ctx, int x, int y, int z)
    return result;
 }
 
+int mapcache_util_quadkey_zoom_start(mapcache_grid *grid) {
+   // calculate quadkey zoom start for grid.
+   // For example, if first level has 4 x 4 tiles, quadkey zoom start will be 2.
+   unsigned int maxx = grid->levels[0]->maxx;
+   unsigned int maxy = grid->levels[0]->maxy;
+   unsigned int max = maxx > maxy ? maxx : maxy;
+   return (int) ceil(log(max) / log(2));
+}
+
 char* mapcache_util_get_tile_key(mapcache_context *ctx, mapcache_tile *tile, char *template,
                                  char* sanitized_chars, char *sanitize_to)
 {
@@ -468,11 +477,13 @@ char* mapcache_util_get_tile_key(mapcache_context *ctx, mapcache_tile *tile, cha
       path = mapcache_util_str_replace(ctx->pool, path, "{ext}",
                                        tile->tileset->format ? tile->tileset->format->extension : "png");
     if(strstr(path,"{quadkey}")) {
-      char *key = mapcache_util_quadkey_encode(ctx, tile->x, tile->y, tile->z + 1);
+      int zoomstart = mapcache_util_quadkey_zoom_start(tile->grid_link->grid);
+      char *key = mapcache_util_quadkey_encode(ctx, tile->x, tile->y, tile->z + zoomstart);
       path = mapcache_util_str_replace(ctx->pool,path, "{quadkey}", key);
     }
     if(strstr(path,"{quadkey64}")) {
-      char *key = mapcache_util_quadkey64_encode(ctx, tile->x, tile->y, tile->z + 1);
+      int zoomstart = mapcache_util_quadkey_zoom_start(tile->grid_link->grid);
+      char *key = mapcache_util_quadkey64_encode(ctx, tile->x, tile->y, tile->z + zoomstart);
       path = mapcache_util_str_replace(ctx->pool,path, "{quadkey64}", key);
     }
   } else {
