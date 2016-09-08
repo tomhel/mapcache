@@ -98,6 +98,32 @@ char *base64_encode(apr_pool_t *pool, const unsigned char *data, size_t input_le
   return encoded_data;
 }
 
+/*
+ * Encode a number to base 64 using printable ascii characters.
+ */
+char *mapcache_util_base64ascii_encode(mapcache_context *ctx, int value)
+{
+  char* result;
+  int size = 1;
+
+  if (value < 0) {
+    ctx->set_error(ctx, 500, "can not convert negative number %d to base 64", value);
+    return NULL;
+  }
+
+  if (value > 0) {
+    // compute length of number in base 64
+    size = (int) floor(log(value) / log(64) + 1);
+  }
+
+  result = apr_pcalloc(ctx->pool, size + 1);
+
+  do {
+    result[--size] = encoding_table[value % 64];
+  } while (value /= 64);
+
+  return result;
+}
 
 int mapcache_util_extract_int_list(mapcache_context *ctx, const char* cargs,
                                    const char *sdelim, int **numbers, int *numbers_count)
@@ -418,6 +444,9 @@ char* mapcache_util_get_tile_key(mapcache_context *ctx, mapcache_tile *tile, cha
       path = mapcache_util_str_replace(ctx->pool,path, "{inv_x}",
                                        apr_psprintf(ctx->pool,"%d",
                                                     tile->grid_link->grid->levels[tile->z]->maxx - tile->x - 1));
+    else if(strstr(path,"{x64}"))
+      path = mapcache_util_str_replace(ctx->pool,path, "{x64}",
+                                       apr_psprintf(ctx->pool,"%s",mapcache_util_base64ascii_encode(ctx, tile->x)));
     if(strstr(path,"{y}"))
       path = mapcache_util_str_replace(ctx->pool,path, "{y}",
                                        apr_psprintf(ctx->pool,"%d",tile->y));
@@ -425,6 +454,9 @@ char* mapcache_util_get_tile_key(mapcache_context *ctx, mapcache_tile *tile, cha
       path = mapcache_util_str_replace(ctx->pool,path, "{inv_y}",
                                        apr_psprintf(ctx->pool,"%d",
                                                     tile->grid_link->grid->levels[tile->z]->maxy - tile->y - 1));
+    else if(strstr(path,"{y64}"))
+      path = mapcache_util_str_replace(ctx->pool,path, "{y64}",
+                                       apr_psprintf(ctx->pool,"%s",mapcache_util_base64ascii_encode(ctx, tile->y)));
     if(strstr(path,"{z}"))
       path = mapcache_util_str_replace(ctx->pool,path, "{z}",
                                        apr_psprintf(ctx->pool,"%d",tile->z));
@@ -432,6 +464,9 @@ char* mapcache_util_get_tile_key(mapcache_context *ctx, mapcache_tile *tile, cha
       path = mapcache_util_str_replace(ctx->pool,path, "{inv_z}",
                                        apr_psprintf(ctx->pool,"%d",
                                                     tile->grid_link->grid->nlevels - tile->z - 1));
+    else if(strstr(path,"{z64}"))
+      path = mapcache_util_str_replace(ctx->pool,path, "{z64}",
+                                       apr_psprintf(ctx->pool,"%s",mapcache_util_base64ascii_encode(ctx, tile->z)));
     if(strstr(path,"{quadkey}")) {
       char *quadkey = mapcache_util_quadkey_encode(ctx, tile->x, tile->y, tile->z);
       path = mapcache_util_str_replace(ctx->pool,path, "{quadkey}", quadkey);
