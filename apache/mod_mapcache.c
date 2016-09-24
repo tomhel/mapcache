@@ -82,6 +82,14 @@ struct mapcache_server_cfg {
   apr_array_header_t *aliases; /**< list of mapcache configurations aliased to a server uri */
   int cp_sharing_is_set;
   int cp_sharing;
+  int cp_min_is_set;
+  int cp_min;
+  int cp_smax_is_set;
+  int cp_smax;
+  int cp_hmax_is_set;
+  int cp_hmax;
+  int cp_ttl_is_set;
+  int cp_ttl;
 };
 
 void apache_context_server_log(mapcache_context *c, mapcache_log_level level, char *message, ...)
@@ -352,9 +360,9 @@ static void mod_mapcache_child_init(apr_pool_t *pool, server_rec *s)
     for(i=0;i<cfg->aliases->nelts;i++) {
       mapcache_alias_entry *alias_entry = APR_ARRAY_IDX(cfg->aliases,i,mapcache_alias_entry*);
       if(cp == NULL) {
-        rv = mapcache_connection_pool_create(&cp,pool);
+        rv = mapcache_connection_pool_create_custom(&cp,pool,cfg->cp_min,cfg->cp_smax,cfg->cp_hmax,cfg->cp_ttl);
         alias_entry->cp = cp;
-        ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, s, "creating a child process mapcache connection pool on server %s for alias %s", s->server_hostname, alias_entry->endpoint);
+        ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, s, "creating a child process mapcache connection pool (min=%d,smax=%d,hmax=%d,ttl=%d) on server %s for alias %s", cfg->cp_min, cfg->cp_smax, cfg->cp_hmax, cfg->cp_ttl, s->server_hostname, alias_entry->endpoint);
         if(rv!=APR_SUCCESS) {
           ap_log_error(APLOG_MARK, APLOG_CRIT, 0, s, "failed to create mapcache connection pool");
         }
@@ -598,6 +606,14 @@ static void* mod_mapcache_create_server_conf(apr_pool_t *pool, server_rec *s)
   cfg->aliases = apr_array_make(pool,1,sizeof(mapcache_alias_entry*));
   cfg->cp_sharing = 0;
   cfg->cp_sharing_is_set = 0;
+  cfg->cp_min = 1;
+  cfg->cp_min_is_set = 0;
+  cfg->cp_smax = 5;
+  cfg->cp_smax_is_set = 0;
+  cfg->cp_hmax = 200;
+  cfg->cp_hmax_is_set = 0;
+  cfg->cp_ttl = 60;
+  cfg->cp_ttl_is_set = 0;
   return cfg;
 }
 
@@ -610,7 +626,16 @@ static void *mod_mapcache_merge_server_conf(apr_pool_t *p, void *base_, void *vh
 
   cfg->aliases = apr_array_append(p, vhost->aliases,base->aliases);
 
+  cfg->cp_min = vhost->cp_min_is_set ? vhost->cp_min : cfg->cp_min;
+  cfg->cp_smax = vhost->cp_smax_is_set ? vhost->cp_smax : cfg->cp_smax;
+  cfg->cp_hmax = vhost->cp_hmax_is_set ? vhost->cp_hmax : cfg->cp_hmax;
+  cfg->cp_ttl = vhost->cp_ttl_is_set ? vhost->cp_ttl : cfg->cp_ttl;
   cfg->cp_sharing = vhost->cp_sharing_is_set ? vhost->cp_sharing : cfg->cp_sharing;
+
+  cfg->cp_min_is_set = vhost->cp_min_is_set || cfg->cp_min_is_set;
+  cfg->cp_smax_is_set = vhost->cp_smax_is_set || cfg->cp_smax_is_set;
+  cfg->cp_hmax_is_set = vhost->cp_hmax_is_set || cfg->cp_hmax_is_set;
+  cfg->cp_ttl_is_set = vhost->cp_ttl_is_set || cfg->cp_ttl_is_set;
   cfg->cp_sharing_is_set = vhost->cp_sharing_is_set || cfg->cp_sharing_is_set;
 
 #if 0
@@ -689,9 +714,53 @@ static const char* mapcache_set_cp_sharing(cmd_parms *cmd, void *cfg, const int 
   return NULL;
 }
 
+static const char* mapcache_set_cp_min(cmd_parms *cmd, void *cfg, const char* arg)
+{
+  mapcache_server_cfg *sconfig = ap_get_module_config(cmd->server->module_config, &mapcache_module);
+  if(!sconfig)
+    return "no mapcache module config, server bug?";
+  sconfig->cp_min_is_set = 1;
+  sconfig->cp_min = atoi(arg);
+  return NULL;
+}
+
+static const char* mapcache_set_cp_smax(cmd_parms *cmd, void *cfg, const char* arg)
+{
+  mapcache_server_cfg *sconfig = ap_get_module_config(cmd->server->module_config, &mapcache_module);
+  if(!sconfig)
+    return "no mapcache module config, server bug?";
+  sconfig->cp_smax_is_set = 1;
+  sconfig->cp_smax = atoi(arg);
+  return NULL;
+}
+
+static const char* mapcache_set_cp_hmax(cmd_parms *cmd, void *cfg, const char* arg)
+{
+  mapcache_server_cfg *sconfig = ap_get_module_config(cmd->server->module_config, &mapcache_module);
+  if(!sconfig)
+    return "no mapcache module config, server bug?";
+  sconfig->cp_hmax_is_set = 1;
+  sconfig->cp_hmax = atoi(arg);
+  return NULL;
+}
+
+static const char* mapcache_set_cp_ttl(cmd_parms *cmd, void *cfg, const char* arg)
+{
+  mapcache_server_cfg *sconfig = ap_get_module_config(cmd->server->module_config, &mapcache_module);
+  if(!sconfig)
+    return "no mapcache module config, server bug?";
+  sconfig->cp_ttl_is_set = 1;
+  sconfig->cp_ttl = atoi(arg);
+  return NULL;
+}
+
 
 static const command_rec mod_mapcache_cmds[] = {
   AP_INIT_TAKE2("MapCacheAlias", mapcache_add_alias ,NULL,RSRC_CONF,"Aliased location of configuration file"),
+  AP_INIT_TAKE1("MapCacheConnectionPoolMin", mapcache_set_cp_min ,NULL,RSRC_CONF,"Allowed minimum number of available resources"),
+  AP_INIT_TAKE1("MapCacheConnectionPoolSMax",mapcache_set_cp_smax ,NULL,RSRC_CONF,"Resources will be destroyed to meet this maximum restriction as they expire (reach their ttl)"),
+  AP_INIT_TAKE1("MapCacheConnectionPoolHMax", mapcache_set_cp_hmax ,NULL,RSRC_CONF,"Absolute maximum limit on the number of total resources"),
+  AP_INIT_TAKE1("MapCacheConnectionPoolTTL", mapcache_set_cp_ttl ,NULL,RSRC_CONF,"If non-zero, sets the maximum amount of time in seconds an unused resource is valid"),
   AP_INIT_FLAG("MapCacheConnectionPoolSharing", mapcache_set_cp_sharing ,NULL,RSRC_CONF,"Share connection pool between all MapCache aliases in the context"),
   { NULL }
 } ;
