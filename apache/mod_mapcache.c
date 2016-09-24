@@ -80,6 +80,8 @@ struct mapcache_alias_entry {
 
 struct mapcache_server_cfg {
   apr_array_header_t *aliases; /**< list of mapcache configurations aliased to a server uri */
+  int cp_sharing_is_set;
+  int cp_sharing;
 };
 
 void apache_context_server_log(mapcache_context *c, mapcache_log_level level, char *message, ...)
@@ -345,13 +347,23 @@ static void mod_mapcache_child_init(apr_pool_t *pool, server_rec *s)
 {
   for( ; s ; s=s->next) {
     mapcache_server_cfg* cfg = ap_get_module_config(s->module_config, &mapcache_module);
+    mapcache_connection_pool *cp = NULL;
     int i,rv;
     for(i=0;i<cfg->aliases->nelts;i++) {
       mapcache_alias_entry *alias_entry = APR_ARRAY_IDX(cfg->aliases,i,mapcache_alias_entry*);
-      rv = mapcache_connection_pool_create(&(alias_entry->cp),pool);
-      ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, s, "creating a child process mapcache connection pool on server %s for alias %s", s->server_hostname, alias_entry->endpoint);
-      if(rv!=APR_SUCCESS) {
-        ap_log_error(APLOG_MARK, APLOG_CRIT, 0, s, "failed to create mapcache connection pool");
+      if(cp == NULL) {
+        rv = mapcache_connection_pool_create(&cp,pool);
+        alias_entry->cp = cp;
+        ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, s, "creating a child process mapcache connection pool on server %s for alias %s", s->server_hostname, alias_entry->endpoint);
+        if(rv!=APR_SUCCESS) {
+          ap_log_error(APLOG_MARK, APLOG_CRIT, 0, s, "failed to create mapcache connection pool");
+        }
+        if(!cfg->cp_sharing) {
+          cp = NULL;
+        }
+      } else {
+        alias_entry->cp = cp;
+        ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, s, "sharing a child process mapcache connection pool on server %s for alias %s", s->server_hostname, alias_entry->endpoint);
       }
     }
   }
@@ -584,6 +596,8 @@ static void* mod_mapcache_create_server_conf(apr_pool_t *pool, server_rec *s)
 {
   mapcache_server_cfg *cfg = apr_pcalloc(pool, sizeof(mapcache_server_cfg));
   cfg->aliases = apr_array_make(pool,1,sizeof(mapcache_alias_entry*));
+  cfg->cp_sharing = 0;
+  cfg->cp_sharing_is_set = 0;
   return cfg;
 }
 
@@ -595,6 +609,9 @@ static void *mod_mapcache_merge_server_conf(apr_pool_t *p, void *base_, void *vh
   mapcache_server_cfg *cfg = apr_pcalloc(p,sizeof(mapcache_server_cfg));
 
   cfg->aliases = apr_array_append(p, vhost->aliases,base->aliases);
+
+  cfg->cp_sharing = vhost->cp_sharing_is_set ? vhost->cp_sharing : cfg->cp_sharing;
+  cfg->cp_sharing_is_set = vhost->cp_sharing_is_set || cfg->cp_sharing_is_set;
 
 #if 0
   {
@@ -662,10 +679,20 @@ static const char* mapcache_add_alias(cmd_parms *cmd, void *cfg, const char *ali
   return NULL;
 }
 
+static const char* mapcache_set_cp_sharing(cmd_parms *cmd, void *cfg, const int flag)
+{
+  mapcache_server_cfg *sconfig = ap_get_module_config(cmd->server->module_config, &mapcache_module);
+  if(!sconfig)
+    return "no mapcache module config, server bug?";
+  sconfig->cp_sharing_is_set = 1;
+  sconfig->cp_sharing = flag;
+  return NULL;
+}
 
 
 static const command_rec mod_mapcache_cmds[] = {
   AP_INIT_TAKE2("MapCacheAlias", mapcache_add_alias ,NULL,RSRC_CONF,"Aliased location of configuration file"),
+  AP_INIT_FLAG("MapCacheConnectionPoolSharing", mapcache_set_cp_sharing ,NULL,RSRC_CONF,"Share connection pool between all MapCache aliases in the context"),
   { NULL }
 } ;
 
