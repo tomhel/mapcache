@@ -328,7 +328,7 @@ static void mod_mapcache_child_init(apr_pool_t *pool, server_rec *s)
         alias_entry->cp = cp;
         ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, s, "creating a child process mapcache connection pool (min=%d,smax=%d,hmax=%d,ttl=%d) on server %s for alias %s", cfg->cp_min, cfg->cp_smax, cfg->cp_hmax, cfg->cp_ttl, s->server_hostname, alias_entry->endpoint);
         if(rv!=APR_SUCCESS) {
-          ap_log_error(APLOG_MARK, APLOG_CRIT, 0, s, "failed to create mapcache connection pool");
+          ap_log_error(APLOG_MARK, APLOG_CRIT, 0, s, "failed to create mapcache connection pool. if using a custom pool configuration ensure it is valid");
         }
         if(!cfg->cp_sharing) {
           cp = NULL;
@@ -748,6 +748,9 @@ static const char* mapcache_set_cp_min(cmd_parms *cmd, void *cfg, const char* ar
     return "no mapcache module config, server bug?";
   sconfig->cp_min_is_set = 1;
   sconfig->cp_min = atoi(arg);
+  if(sconfig->cp_min < 0) {
+    return "MapCacheConnectionPoolMin must be zero or larger";
+  }
   return NULL;
 }
 
@@ -758,6 +761,9 @@ static const char* mapcache_set_cp_smax(cmd_parms *cmd, void *cfg, const char* a
     return "no mapcache module config, server bug?";
   sconfig->cp_smax_is_set = 1;
   sconfig->cp_smax = atoi(arg);
+  if(sconfig->cp_smax < 0) {
+    return "MapCacheConnectionPoolSMax must be zero or larger";
+  }
   return NULL;
 }
 
@@ -768,6 +774,9 @@ static const char* mapcache_set_cp_hmax(cmd_parms *cmd, void *cfg, const char* a
     return "no mapcache module config, server bug?";
   sconfig->cp_hmax_is_set = 1;
   sconfig->cp_hmax = atoi(arg);
+  if(sconfig->cp_hmax <= 0) {
+    return "MapCacheConnectionPoolHMax must be larger than zero";
+  }
   return NULL;
 }
 
@@ -778,6 +787,9 @@ static const char* mapcache_set_cp_ttl(cmd_parms *cmd, void *cfg, const char* ar
     return "no mapcache module config, server bug?";
   sconfig->cp_ttl_is_set = 1;
   sconfig->cp_ttl = atoi(arg);
+  if(sconfig->cp_ttl < 0) {
+    return "MapCacheConnectionPoolTTL must be zero or larger";
+  }
   return NULL;
 }
 
