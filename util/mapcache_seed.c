@@ -86,7 +86,7 @@ double percent_failed_allowed = 1.0;
 int n_metatiles_tot = 0;
 int n_nodata_tot = 0;
 int rate_limit = 0;
-FILE *failed_log = NULL, *retry_log = NULL;
+FILE *failed_log = NULL, *retry_log = NULL, *success_log = NULL;
 #define FAIL_BACKLOG_COUNT 1000
 
 apr_time_t age_limit = 0;
@@ -250,6 +250,7 @@ static const apr_getopt_option_t seed_options[] = {
   { "ogr-layer", 'l', TRUE, "layer inside datasource"},
 #endif
   { "log-failed", 'L', TRUE, "log failed tiles to [file]"},
+  { "log-successful", 'S', TRUE, "log successful tiles to [file]"},
   { "mode", 'm', TRUE, "mode: seed (default), delete or transfer" },
   { "metasize", 'M', TRUE, "override metatile size while seeding, eg 8,8" },
   { "nthreads", 'n', TRUE, "number of parallel threads to use (incompatible with -p/--nprocesses)" },
@@ -797,6 +798,9 @@ static void* APR_THREAD_FUNC log_thread_fn(apr_thread_t *thread, void *data) {
       if(st->nodata) {
         n_nodata_tot++;
       }
+      if(success_log) {
+        fprintf(success_log,"%d,%d,%d\n",st->x,st->y,st->z);
+      }
       if(!quiet) {
         struct mctimeval now;
         mapcache_gettimeofday(&now,NULL);
@@ -992,6 +996,12 @@ int main(int argc, const char **argv)
         failed_log = fopen(optarg,"w");
         if(!failed_log) {
           return usage(argv[0],"failed to open -L|--log-failed file for writing");
+        }
+        break;
+      case 'S':
+        success_log = fopen(optarg,"w");
+        if(!success_log) {
+          return usage(argv[0],"failed to open -S|--log-successful file for writing");
         }
         break;
       case 'R':
