@@ -1048,15 +1048,19 @@ void parseTileset(mapcache_context *ctx, ezxml_t node, mapcache_cfg *config)
   }
 
   if ((cur_node = ezxml_child(node,"metabuffer")) != NULL) {
-    char *endptr;
-    tileset->metabuffer = (int)strtol(cur_node->txt,&endptr,10);
-    if(*endptr != 0) {
+    int *values, nvalues;
+    value = apr_pstrdup(ctx->pool,cur_node->txt);
+
+    if(MAPCACHE_SUCCESS != mapcache_util_extract_int_list(ctx, cur_node->txt, NULL,
+        &values, &nvalues) || nvalues < 1 || nvalues > 2) {
       ctx->set_error(ctx, 400, "failed to parse metabuffer %s."
-                     "(expecting an  integer, "
-                     "eg <metabuffer>1</metabuffer>",
+                     "(expecting 1 or 2 space separated integers, "
+                     "eg <metabuffer>1</metabuffer> or <metabuffer>1 1</metabuffer>",
                      cur_node->txt);
       return;
     }
+    tileset->metabuffer_x = values[0];
+    tileset->metabuffer_y = values[nvalues-1];
   }
 
   mapcache_tileset_configuration_check(ctx,tileset);
