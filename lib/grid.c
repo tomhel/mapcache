@@ -74,7 +74,7 @@ void mapcache_grid_get_tile_extent(mapcache_context *ctx, mapcache_grid *grid,
 void mapcache_grid_get_metatile_extent(mapcache_context *ctx, mapcache_tile *tile, mapcache_extent *extent) {
   mapcache_grid *grid = tile->grid_link->grid;
   double res = grid->levels[tile->z]->resolution;
-  double gbuffer,gwidth,gheight,fullgwidth,fullgheight;
+  double gbuffer_x,gbuffer_y,gwidth,gheight,fullgwidth,fullgheight;
   mapcache_tileset *tileset = tile->tileset;
   int mtx,mty,blx,bly,mtsx,mtsy;
   mtx = tile->x / tileset->metasize_x;
@@ -101,7 +101,8 @@ void mapcache_grid_get_metatile_extent(mapcache_context *ctx, mapcache_tile *til
   }
 
   /* buffer in geographical units */
-  gbuffer = res * tileset->metabuffer;
+  gbuffer_x = res * tileset->metabuffer_x;
+  gbuffer_y = res * tileset->metabuffer_y;
 
   /* adjusted metatile size in geographical units */
   gwidth = res * mtsx * grid->tile_sx;
@@ -113,16 +114,16 @@ void mapcache_grid_get_metatile_extent(mapcache_context *ctx, mapcache_tile *til
 
   switch(grid->origin) {
     case MAPCACHE_GRID_ORIGIN_BOTTOM_LEFT:
-      extent->minx = grid->extent.minx + mtx * fullgwidth - gbuffer;
-      extent->miny = grid->extent.miny + mty * fullgheight - gbuffer;
-      extent->maxx = extent->minx + gwidth + 2 * gbuffer;
-      extent->maxy = extent->miny + gheight + 2 * gbuffer;
+      extent->minx = grid->extent.minx + mtx * fullgwidth - gbuffer_x;
+      extent->miny = grid->extent.miny + mty * fullgheight - gbuffer_y;
+      extent->maxx = extent->minx + gwidth + 2 * gbuffer_x;
+      extent->maxy = extent->miny + gheight + 2 * gbuffer_y;
       break;
     case MAPCACHE_GRID_ORIGIN_TOP_LEFT:
-      extent->minx = grid->extent.minx + mtx * fullgwidth - gbuffer;
-      extent->maxy = grid->extent.maxy - mty * fullgheight + gbuffer;
-      extent->maxx = extent->minx + gwidth + 2 * gbuffer;
-      extent->miny = extent->maxy - gheight - 2 * gbuffer;
+      extent->minx = grid->extent.minx + mtx * fullgwidth - gbuffer_x;
+      extent->maxy = grid->extent.maxy - mty * fullgheight + gbuffer_y;
+      extent->maxx = extent->minx + gwidth + 2 * gbuffer_x;
+      extent->miny = extent->maxy - gheight - 2 * gbuffer_y;
       break;
     case MAPCACHE_GRID_ORIGIN_BOTTOM_RIGHT:
     case MAPCACHE_GRID_ORIGIN_TOP_RIGHT:

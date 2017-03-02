@@ -319,20 +319,20 @@ void mapcache_image_metatile_split(mapcache_context *ctx, mapcache_metatile *mt)
         tileimg->stride = metatile->stride;
         switch(mt->map.grid_link->grid->origin) {
           case MAPCACHE_GRID_ORIGIN_BOTTOM_LEFT:
-            sx = mt->map.tileset->metabuffer + i * tileimg->w;
-            sy = mt->map.height - (mt->map.tileset->metabuffer + (j+1) * tileimg->h);
+            sx = mt->map.tileset->metabuffer_x + i * tileimg->w;
+            sy = mt->map.height - (mt->map.tileset->metabuffer_y + (j+1) * tileimg->h);
             break;
           case MAPCACHE_GRID_ORIGIN_TOP_LEFT:
-            sx = mt->map.tileset->metabuffer + i * tileimg->w;
-            sy = mt->map.tileset->metabuffer + j * tileimg->h;
+            sx = mt->map.tileset->metabuffer_x + i * tileimg->w;
+            sy = mt->map.tileset->metabuffer_y + j * tileimg->h;
             break;
           case MAPCACHE_GRID_ORIGIN_BOTTOM_RIGHT: /* FIXME not implemented */
-            sx = mt->map.tileset->metabuffer + i * tileimg->w;
-            sy = mt->map.height - (mt->map.tileset->metabuffer + (j+1) * tileimg->h);
+            sx = mt->map.tileset->metabuffer_x + i * tileimg->w;
+            sy = mt->map.height - (mt->map.tileset->metabuffer_y + (j+1) * tileimg->h);
             break;
           case MAPCACHE_GRID_ORIGIN_TOP_RIGHT:  /* FIXME not implemented */
-            sx = mt->map.tileset->metabuffer + i * tileimg->w;
-            sy = mt->map.height - (mt->map.tileset->metabuffer + (j+1) * tileimg->h);
+            sx = mt->map.tileset->metabuffer_x + i * tileimg->w;
+            sy = mt->map.height - (mt->map.tileset->metabuffer_y + (j+1) * tileimg->h);
             break;
           default:
             ctx->set_error(ctx,500,"BUG: unknown grid origin");
@@ -351,7 +351,8 @@ void mapcache_image_metatile_split(mapcache_context *ctx, mapcache_metatile *mt)
 #ifdef DEBUG
     if(mt->map.tileset->metasize_x != 1 ||
         mt->map.tileset->metasize_y != 1 ||
-        mt->map.tileset->metabuffer != 0 ||
+        mt->map.tileset->metabuffer_x != 0 ||
+        mt->map.tileset->metabuffer_y != 0 ||
         !mt->map.encoded_data) {
       ctx->set_error(ctx, 500, "##### BUG ##### using a metatile with no format");
       return;

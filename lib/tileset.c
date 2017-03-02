@@ -99,16 +99,17 @@ void mapcache_tileset_configuration_check(mapcache_context *ctx, mapcache_tilese
     return;
   }
 
-  if(tileset->metabuffer < 0 || tileset->metasize_x < 1 || tileset->metasize_y < 1) {
-    ctx->set_error(ctx,400,"tileset \"%s\" has invalid metasize %d,%d or metabuffer %d",
-                   tileset->name,tileset->metasize_x,tileset->metasize_y,tileset->metabuffer);
+  if(tileset->metabuffer_x < 0 || tileset->metabuffer_y < 0 || tileset->metasize_x < 1 || tileset->metasize_y < 1) {
+    ctx->set_error(ctx,400,"tileset \"%s\" has invalid metasize %d,%d or metabuffer %d,%d",
+                   tileset->name,tileset->metasize_x,tileset->metasize_y,tileset->metabuffer_x,tileset->metabuffer_y);
     return;
   }
 
   if(!tileset->format && (
         tileset->metasize_x != 1 ||
         tileset->metasize_y != 1 ||
-        tileset->metabuffer != 0 ||
+        tileset->metabuffer_x != 0 ||
+        tileset->metabuffer_y != 0 ||
         tileset->watermark)) {
     if(tileset->watermark) {
       ctx->set_error(ctx,400,"tileset \"%s\" has no <format> configured, but it is needed for the watermark",
@@ -122,7 +123,7 @@ void mapcache_tileset_configuration_check(mapcache_context *ctx, mapcache_tilese
   }
 
   if(tileset->format && tileset->format->type == GC_RAW) {
-    if(tileset->metasize_x != 1 || tileset->metasize_y != 1 || tileset->metabuffer != 0) {
+    if(tileset->metasize_x != 1 || tileset->metasize_y != 1 || tileset->metabuffer_x != 0 || tileset->metabuffer_y != 0) {
       ctx->set_error(ctx, 400, "tileset \"%s\" references a RAW format type, metatiling is not supported for the \"%s\" format", tileset->name, tileset->format->name);
     }
   }
@@ -398,7 +399,7 @@ mapcache_metatile* mapcache_tileset_metatile_get(mapcache_context *ctx, mapcache
   mapcache_tileset *tileset = tile->tileset;
   mapcache_grid *grid = tile->grid_link->grid;
   double res = grid->levels[tile->z]->resolution;
-  double gbuffer,gwidth,gheight,fullgwidth,fullgheight;
+  double gbuffer_x,gbuffer_y,gwidth,gheight,fullgwidth,fullgheight;
 
   mt->map.tileset = tileset;
   mt->map.grid_link = tile->grid_link;
@@ -428,12 +429,13 @@ mapcache_metatile* mapcache_tileset_metatile_get(mapcache_context *ctx, mapcache
 
   mt->ntiles = mt->metasize_x * mt->metasize_y;
   mt->tiles = (mapcache_tile*)apr_pcalloc(ctx->pool, mt->ntiles * sizeof(mapcache_tile));
-  mt->map.width =  mt->metasize_x * grid->tile_sx + 2 * tileset->metabuffer;
-  mt->map.height =  mt->metasize_y * grid->tile_sy + 2 * tileset->metabuffer;
+  mt->map.width =  mt->metasize_x * grid->tile_sx + 2 * tileset->metabuffer_x;
+  mt->map.height =  mt->metasize_y * grid->tile_sy + 2 * tileset->metabuffer_y;
   mt->map.dimensions = tile->dimensions;
 
   /* buffer in geographical units */
-  gbuffer = res * tileset->metabuffer;
+  gbuffer_x = res * tileset->metabuffer_x;
+  gbuffer_y = res * tileset->metabuffer_y;
 
   /* adjusted metatile size in geographical units */
   gwidth = res * mt->metasize_x * grid->tile_sx;
@@ -445,16 +447,16 @@ mapcache_metatile* mapcache_tileset_metatile_get(mapcache_context *ctx, mapcache
 
   switch(grid->origin) {
     case MAPCACHE_GRID_ORIGIN_BOTTOM_LEFT:
-      mt->map.extent.minx = grid->extent.minx + mt->x * fullgwidth - gbuffer;
-      mt->map.extent.miny = grid->extent.miny + mt->y * fullgheight - gbuffer;
-      mt->map.extent.maxx = mt->map.extent.minx + gwidth + 2 * gbuffer;
-      mt->map.extent.maxy = mt->map.extent.miny + gheight + 2 * gbuffer;
+      mt->map.extent.minx = grid->extent.minx + mt->x * fullgwidth - gbuffer_x;
+      mt->map.extent.miny = grid->extent.miny + mt->y * fullgheight - gbuffer_y;
+      mt->map.extent.maxx = mt->map.extent.minx + gwidth + 2 * gbuffer_x;
+      mt->map.extent.maxy = mt->map.extent.miny + gheight + 2 * gbuffer_y;
       break;
     case MAPCACHE_GRID_ORIGIN_TOP_LEFT:
-      mt->map.extent.minx = grid->extent.minx + mt->x * fullgwidth - gbuffer;
-      mt->map.extent.maxy = grid->extent.maxy - mt->y * fullgheight + gbuffer;
-      mt->map.extent.maxx = mt->map.extent.minx + gwidth + 2 * gbuffer;
-      mt->map.extent.miny = mt->map.extent.maxy - gheight - 2 * gbuffer;
+      mt->map.extent.minx = grid->extent.minx + mt->x * fullgwidth - gbuffer_x;
+      mt->map.extent.maxy = grid->extent.maxy - mt->y * fullgheight + gbuffer_y;
+      mt->map.extent.maxx = mt->map.extent.minx + gwidth + 2 * gbuffer_x;
+      mt->map.extent.miny = mt->map.extent.maxy - gheight - 2 * gbuffer_y;
       break;
     case MAPCACHE_GRID_ORIGIN_BOTTOM_RIGHT:
     case MAPCACHE_GRID_ORIGIN_TOP_RIGHT:
@@ -506,7 +508,8 @@ mapcache_tileset* mapcache_tileset_create(mapcache_context *ctx)
 {
   mapcache_tileset* tileset = (mapcache_tileset*)apr_pcalloc(ctx->pool, sizeof(mapcache_tileset));
   tileset->metasize_x = tileset->metasize_y = 1;
-  tileset->metabuffer = 0;
+  tileset->metabuffer_x = 0;
+  tileset->metabuffer_y = 0;
   tileset->expires = 300; /*set a reasonable default to 5 mins */
   tileset->auto_expire = 0;
   tileset->read_only = 0;
@@ -526,7 +529,8 @@ mapcache_tileset* mapcache_tileset_clone(mapcache_context *ctx, mapcache_tileset
   mapcache_tileset* dst = (mapcache_tileset*)apr_pcalloc(ctx->pool, sizeof(mapcache_tileset));
   dst->metasize_x = src->metasize_x;
   dst->metasize_y = src->metasize_y;
-  dst->metabuffer = src->metabuffer;
+  dst->metabuffer_x = src->metabuffer_x;
+  dst->metabuffer_y = src->metabuffer_y;
   dst->expires = src->expires;
   dst->auto_expire = src->auto_expire;
   dst->metadata = src->metadata;

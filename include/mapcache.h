@@ -1098,7 +1098,7 @@ struct mapcache_tileset {
   /**
    * size of the gutter around the metatile that should be requested to the mapcache_tileset::source
    */
-  int metabuffer;
+  int metabuffer_x, metabuffer_y;
 
   /**
    * number of seconds that should be returned to the client in an Expires: header
