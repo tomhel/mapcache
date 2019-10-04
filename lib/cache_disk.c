@@ -49,6 +49,7 @@ struct mapcache_cache_disk {
   char *base_directory;
   char *filename_template;
   int symlink_blank;
+  int detect_blank;
   int creation_retry;
 
   /**
@@ -421,8 +422,8 @@ static int _mapcache_cache_disk_get(mapcache_context *ctx, mapcache_cache *pcach
                        ctx->pool)) == APR_SUCCESS) {
     rv = apr_file_info_get(&finfo, APR_FINFO_SIZE|APR_FINFO_MTIME, f);
     if(!finfo.size) {
-      ctx->set_error(ctx, 500, "tile %s has no data",filename);
-      return MAPCACHE_FAILURE;
+      ctx->log(ctx, MAPCACHE_WARN, "tile %s has 0 length data",filename);
+      return MAPCACHE_CACHE_MISS;
     }
 
     size = finfo.size;
@@ -435,10 +436,10 @@ static int _mapcache_cache_disk_get(mapcache_context *ctx, mapcache_cache *pcach
      * i.e. normally only once.
      */
     tile->mtime = finfo.mtime;
-    tile->encoded_data = mapcache_buffer_create(size,ctx->pool);
 
 #ifndef NOMMAP
 
+    tile->encoded_data = mapcache_buffer_create(0,ctx->pool);
     rv = apr_mmap_create(&tilemmap,f,0,finfo.size,APR_MMAP_READ,ctx->pool);
     if(rv != APR_SUCCESS) {
       char errmsg[120];
@@ -448,6 +449,7 @@ static int _mapcache_cache_disk_get(mapcache_context *ctx, mapcache_cache *pcach
     tile->encoded_data->buf = tilemmap->mm;
     tile->encoded_data->size = tile->encoded_data->avail = finfo.size;
 #else
+    tile->encoded_data = mapcache_buffer_create(size,ctx->pool);
     //manually add the data to our buffer
     apr_file_read(f,(void*)tile->encoded_data->buf,&size);
     tile->encoded_data->size = size;
@@ -505,6 +507,22 @@ static void _mapcache_cache_disk_set(mapcache_context *ctx, mapcache_cache *pcac
 
   cache->tile_key(ctx, cache, tile, &filename);
   GC_CHECK_ERROR(ctx);
+  if ( cache->detect_blank ) {
+    if(!tile->raw_image) {
+      tile->raw_image = mapcache_imageio_decode(ctx, tile->encoded_data);
+      GC_CHECK_ERROR(ctx);
+    }
+    if(mapcache_image_blank_color(tile->raw_image) != MAPCACHE_FALSE) {
+      if(tile->raw_image->data[3] == 0) {
+        /* We have a blank (uniform) image who's first pixel is fully transparent, thus the whole image is transparent */
+#ifdef DEBUG
+        ctx->log(ctx, MAPCACHE_DEBUG, "skipped blank tile %s",filename);
+#endif
+        tile->nodata = 1;
+        return;
+      }
+    }
+  }
 
   mapcache_make_parent_dirs(ctx,filename);
   GC_CHECK_ERROR(ctx);
@@ -514,14 +532,13 @@ static void _mapcache_cache_disk_set(mapcache_context *ctx, mapcache_cache *pcac
     ctx->set_error(ctx, 500,  "failed to remove file %s: %s",filename, apr_strerror(ret,errmsg,120));
   }
 
-
 #ifdef HAVE_SYMLINK
   if(cache->symlink_blank) {
-    if(!tile->raw_image) {
+    if(tile->tileset->format->type != GC_RAW && !tile->raw_image) {
       tile->raw_image = mapcache_imageio_decode(ctx, tile->encoded_data);
       GC_CHECK_ERROR(ctx);
     }
-    if(mapcache_image_blank_color(tile->raw_image) != MAPCACHE_FALSE) {
+    if(tile->tileset->format->type != GC_RAW && mapcache_image_blank_color(tile->raw_image) != MAPCACHE_FALSE) {
       char *blankname;
       int retry_count_create_symlink = 0;
       char *blankname_rel = NULL;
@@ -602,13 +619,19 @@ static void _mapcache_cache_disk_set(mapcache_context *ctx, mapcache_cache *pcac
       return;
     }
   }
-#endif /*HAVE_SYMLINK*/
+#endif /* HAVE_SYMLINK */
 
   /* go the normal way: either we haven't configured blank tile detection, or the tile was not blank */
 
   if(!tile->encoded_data) {
     tile->encoded_data = tile->tileset->format->write(ctx, tile->raw_image, tile->tileset->format);
     GC_CHECK_ERROR(ctx);
+  }
+
+  bytes = (apr_size_t)tile->encoded_data->size;
+  if(bytes == 0) {
+      ctx->set_error(ctx, 500, "attempting to write 0 length tile to %s",filename);
+      return; /* we could not create the file */
   }
 
   /*
@@ -630,20 +653,20 @@ static void _mapcache_cache_disk_set(mapcache_context *ctx, mapcache_cache *pcac
     GC_CHECK_ERROR(ctx);
   }
 
-  bytes = (apr_size_t)tile->encoded_data->size;
   ret = apr_file_write(f,(void*)tile->encoded_data->buf,&bytes);
   if(ret != APR_SUCCESS) {
     ctx->set_error(ctx, 500,  "failed to write data to file %s (wrote %d of %d bytes): %s",filename, (int)bytes, (int)tile->encoded_data->size, apr_strerror(ret,errmsg,120));
     return; /* we could not create the file */
   }
 
-  if(bytes != tile->encoded_data->size) {
-    ctx->set_error(ctx, 500, "failed to write image data to %s, wrote %d of %d bytes", filename, (int)bytes, (int)tile->encoded_data->size);
-  }
   ret = apr_file_close(f);
   if(ret != APR_SUCCESS) {
     ctx->set_error(ctx, 500,  "failed to close file %s:%s",filename, apr_strerror(ret,errmsg,120));
-    return; /* we could not create the file */
+  }
+
+  if(bytes != tile->encoded_data->size) {
+    ctx->set_error(ctx, 500, "failed to write image data to %s, wrote %d of %d bytes", filename, (int)bytes, (int)tile->encoded_data->size);
+    apr_file_remove(filename, ctx->pool);
   }
 
 }
@@ -697,6 +720,10 @@ static void _mapcache_cache_disk_configuration_parse_xml(mapcache_context *ctx, 
   if ((cur_node = ezxml_child(node,"creation_retry")) != NULL) {
     dcache->creation_retry = atoi(cur_node->txt);
   }
+  if ((cur_node = ezxml_child(node,"detect_blank")) != NULL) {
+    dcache->detect_blank=1;
+  }
+
 }
 
 /**
@@ -725,6 +752,7 @@ mapcache_cache* mapcache_cache_disk_create(mapcache_context *ctx)
     return NULL;
   }
   cache->symlink_blank = 0;
+  cache->detect_blank = 0;
   cache->creation_retry = 0;
   cache->cache.metadata = apr_table_make(ctx->pool,3);
   cache->cache.type = MAPCACHE_CACHE_DISK;

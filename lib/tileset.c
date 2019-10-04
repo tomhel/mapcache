@@ -72,7 +72,6 @@ char* mapcache_tileset_metatile_resource_key(mapcache_context *ctx, mapcache_met
 
 void mapcache_tileset_configuration_check(mapcache_context *ctx, mapcache_tileset *tileset)
 {
-
   /* check we have all we want */
   if(tileset->_cache == NULL) {
     /* TODO: we should allow tilesets with no caches */
@@ -121,6 +120,12 @@ void mapcache_tileset_configuration_check(mapcache_context *ctx, mapcache_tilese
       return;
     }
   }
+
+  if(tileset->format && tileset->format->type == GC_RAW) {
+    if(tileset->metasize_x != 1 || tileset->metasize_y != 1 || tileset->metabuffer != 0) {
+      ctx->set_error(ctx, 400, "tileset \"%s\" references a RAW format type, metatiling is not supported for the \"%s\" format", tileset->name, tileset->format->name);
+    }
+  }
 }
 
 void mapcache_tileset_add_watermark(mapcache_context *ctx, mapcache_tileset *tileset, const char *filename)
@@ -152,6 +157,30 @@ void mapcache_tileset_add_watermark(mapcache_context *ctx, mapcache_tileset *til
   }
   apr_file_close(f);
   tileset->watermark = mapcache_imageio_decode(ctx,watermarkdata);
+}
+
+void mapcache_tileset_tile_validate_z(mapcache_context *ctx, mapcache_tile *tile) {
+  if(tile->z < tile->grid_link->minz || tile->z >= tile->grid_link->maxz) {
+    ctx->set_error(ctx,404,"invalid tile z level");
+  }
+}
+
+void mapcache_tileset_tile_validate_x(mapcache_context *ctx, mapcache_tile *tile) {
+  mapcache_extent_i limits;
+  limits = tile->grid_link->grid_limits[tile->z];
+  if(tile->x<limits.minx || tile->x>=limits.maxx) {
+    ctx->set_error(ctx, 404, "tile x=%d not in [%d,%d[",
+                   tile->x,limits.minx,limits.maxx);
+  }
+}
+
+void mapcache_tileset_tile_validate_y(mapcache_context *ctx, mapcache_tile *tile) {
+  mapcache_extent_i limits;
+  limits = tile->grid_link->grid_limits[tile->z];
+  if(tile->y<limits.miny || tile->y>=limits.maxy) {
+    ctx->set_error(ctx, 404, "tile y=%d not in [%d,%d[",
+                   tile->y,limits.miny,limits.maxy);
+  }
 }
 
 void mapcache_tileset_tile_validate(mapcache_context *ctx, mapcache_tile *tile)
@@ -370,6 +399,7 @@ mapcache_metatile* mapcache_tileset_metatile_get(mapcache_context *ctx, mapcache
   mapcache_grid *grid = tile->grid_link->grid;
   double res = grid->levels[tile->z]->resolution;
   double gbuffer,gwidth,gheight,fullgwidth,fullgheight;
+
   mt->map.tileset = tileset;
   mt->map.grid_link = tile->grid_link;
   mt->z = tile->z;
@@ -456,13 +486,12 @@ mapcache_metatile* mapcache_tileset_metatile_get(mapcache_context *ctx, mapcache
 void mapcache_tileset_render_metatile(mapcache_context *ctx, mapcache_metatile *mt)
 {
   mapcache_tileset *tileset = mt->map.tileset;
-#ifdef DEBUG
+
   if(!tileset->source || tileset->read_only) {
-    ctx->set_error(ctx,500,"###BUG### tileset_render_metatile called on tileset with no source or that is read-only");
+    ctx->set_error(ctx,500,"tileset_render_metatile called on tileset with no source or that is read-only");
     return;
   }
-#endif
-  tileset->source->render_map(ctx, &mt->map);
+  mapcache_source_render_map(ctx, tileset->source, &mt->map);
   GC_CHECK_ERROR(ctx);
   mapcache_image_metatile_split(ctx, mt);
   GC_CHECK_ERROR(ctx);
@@ -790,7 +819,7 @@ void mapcache_tileset_tile_set_get_with_subdimensions(mapcache_context *ctx, map
 
   for(i=0;i<tile->dimensions->nelts; i++) {
     mapcache_requested_dimension *rdim = APR_ARRAY_IDX(tile->dimensions,i,mapcache_requested_dimension*);
-    apr_array_header_t *single_subdimension = rdim->dimension->get_entries_for_value(ctx,rdim->dimension,rdim->requested_value,
+    apr_array_header_t *single_subdimension = mapcache_dimension_get_entries_for_value(ctx,rdim->dimension,rdim->requested_value,
                                                                                      tile->tileset, &extent, tile->grid_link->grid);
     if(GC_HAS_ERROR(ctx)) /* invalid dimension given */
       goto cleanup;
@@ -887,7 +916,19 @@ void mapcache_tileset_tile_set_get_with_subdimensions(mapcache_context *ctx, map
   tile->encoded_data = assembled_buffer;
   tile->raw_image = assembled_image;
   tile->nodata = assembled_nodata;
-  
+
+  /* TODO: how should the no data case be handled generically?
+   * uncomment the following block if this nodata state should be returned to
+   * the requester immediately, without this info being stored to the cache. 
+   * Leaving this uncommented will cause a no-data tile to be (maybe, depending
+   * on the cache's actual configuration) written to the cache
+   */
+  /*
+  if(tile->nodata) {
+    goto cleanup;
+  }
+  */
+
   if(!tile->nodata && !tile->encoded_data) {
     tile->encoded_data = tile->tileset->format->write(ctx, tile->raw_image, tile->tileset->format);
     GC_CHECK_ERROR(ctx);
@@ -925,6 +966,7 @@ cleanup:
 
 void mapcache_tileset_tile_get_with_subdimensions(mapcache_context *ctx, mapcache_tile *tile) {
   int i,ret;
+
   assert(tile->dimensions);
   if(tile->tileset->store_dimension_assemblies) {
     for(i=0;i<tile->dimensions->nelts;i++) {
@@ -1009,7 +1051,6 @@ static void mapcache_tileset_tile_get_without_subdimensions(mapcache_context *ct
     }
   }
 
-
   if (ret == MAPCACHE_CACHE_MISS || ret == MAPCACHE_CACHE_RELOAD) {
     int isLocked = MAPCACHE_FALSE;
     void *lock;
@@ -1028,8 +1069,6 @@ static void mapcache_tileset_tile_get_without_subdimensions(mapcache_context *ct
       mt = mapcache_tileset_metatile_get(ctx, tile);
       isLocked = mapcache_lock_or_wait_for_resource(ctx, ctx->config->locker, mapcache_tileset_metatile_resource_key(ctx,mt), &lock);
       GC_CHECK_ERROR(ctx);
-
-
       if(isLocked == MAPCACHE_TRUE) {
          /* no other thread is doing the rendering, do it ourselves */
 #ifdef DEBUG
@@ -1101,7 +1140,7 @@ void mapcache_tileset_tile_get(mapcache_context *ctx, mapcache_tile *tile) {
       for(i=0; i<tile->dimensions->nelts; i++) {
         apr_array_header_t *rdim_vals;
         rdim = APR_ARRAY_IDX(tile->dimensions,i,mapcache_requested_dimension*);
-        rdim_vals = rdim->dimension->get_entries_for_value(ctx,rdim->dimension,rdim->requested_value, tile->tileset, NULL, tile->grid_link->grid);
+        rdim_vals = mapcache_dimension_get_entries_for_value(ctx,rdim->dimension,rdim->requested_value, tile->tileset, NULL, tile->grid_link->grid);
         GC_CHECK_ERROR(ctx);
         if(rdim_vals->nelts > 1) {
           ctx->set_error(ctx,500,"dimension (%s) for tileset (%s) returned invalid number (%d) of subdimensions (1 expected)",

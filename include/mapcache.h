@@ -50,6 +50,7 @@
 #include <time.h>
 #include <apr_time.h>
 
+
 #define MAPCACHE_SUCCESS 0
 #define MAPCACHE_FAILURE 1
 #define MAPCACHE_TRUE 1
@@ -77,6 +78,7 @@ typedef struct mapcache_image_format_mixed mapcache_image_format_mixed;
 typedef struct mapcache_image_format_png mapcache_image_format_png;
 typedef struct mapcache_image_format_png_q mapcache_image_format_png_q;
 typedef struct mapcache_image_format_jpeg mapcache_image_format_jpeg;
+typedef struct mapcache_image_format_raw mapcache_image_format_raw;
 typedef struct mapcache_cfg mapcache_cfg;
 typedef struct mapcache_tileset mapcache_tileset;
 typedef struct mapcache_cache mapcache_cache;
@@ -114,9 +116,9 @@ typedef struct mapcache_locker mapcache_locker;
 typedef enum {
   MAPCACHE_DIMENSION_VALUES,
   MAPCACHE_DIMENSION_REGEX,
-  MAPCACHE_DIMENSION_INTERVALS,
-  MAPCACHE_DIMENSION_TIME,
-  MAPCACHE_DIMENSION_SQLITE
+  MAPCACHE_DIMENSION_POSTGRESQL,
+  MAPCACHE_DIMENSION_SQLITE,
+  MAPCACHE_DIMENSION_ELASTICSEARCH
 } mapcache_dimension_type;
 
 typedef enum {
@@ -264,7 +266,8 @@ typedef enum {
   MAPCACHE_SOURCE_WMS,
   MAPCACHE_SOURCE_MAPSERVER,
   MAPCACHE_SOURCE_DUMMY,
-  MAPCACHE_SOURCE_GDAL
+  MAPCACHE_SOURCE_GDAL,
+  MAPCACHE_SOURCE_FALLBACK
 } mapcache_source_type;
 
 /**\interface mapcache_source
@@ -275,6 +278,8 @@ struct mapcache_source {
   mapcache_extent data_extent; /**< extent in which this source can produce data */
   mapcache_source_type type;
   apr_table_t *metadata;
+  unsigned int retry_count;
+  double retry_delay;
 
   apr_array_header_t *info_formats;
   /**
@@ -282,11 +287,11 @@ struct mapcache_source {
    *
    * sets the mapcache_metatile::tile::data for the given tile
    */
-  void (*render_map)(mapcache_context *ctx, mapcache_map *map);
+  void (*_render_map)(mapcache_context *ctx, mapcache_source *psource, mapcache_map *map);
 
-  void (*query_info)(mapcache_context *ctx, mapcache_feature_info *fi);
+  void (*_query_info)(mapcache_context *ctx, mapcache_source *psource, mapcache_feature_info *fi);
 
-  void (*configuration_parse_xml)(mapcache_context *ctx, ezxml_t xml, mapcache_source * source);
+  void (*configuration_parse_xml)(mapcache_context *ctx, ezxml_t xml, mapcache_source * source, mapcache_cfg *config);
   void (*configuration_check)(mapcache_context *ctx, mapcache_cfg *cfg, mapcache_source * source);
 };
 
@@ -659,7 +664,7 @@ MS_DLL_EXPORT int mapcache_config_services_enabled(mapcache_context *ctx, mapcac
 /** @{ */
 
 typedef enum {
-  GC_UNKNOWN, GC_PNG, GC_JPEG
+  GC_UNKNOWN, GC_PNG, GC_JPEG, GC_RAW
 } mapcache_image_format_type;
 
 typedef enum {
@@ -901,9 +906,21 @@ void mapcache_configuration_add_cache(mapcache_cfg *config, mapcache_cache *cach
 void mapcache_source_init(mapcache_context *ctx, mapcache_source *source);
 
 /**
+ * \memberof mapcache_source
+ */
+void mapcache_source_render_map(mapcache_context *ctx, mapcache_source *source, mapcache_map *map);
+void mapcache_source_query_info(mapcache_context *ctx, mapcache_source *source,
+    mapcache_feature_info *fi);
+
+/**
  * \memberof mapcache_source_gdal
  */
 mapcache_source* mapcache_source_gdal_create(mapcache_context *ctx);
+
+/**
+ * \memberof mapcache_source_fallback
+ */
+mapcache_source* mapcache_source_fallback_create(mapcache_context *ctx);
 
 /**
  * \memberof mapcache_source_wms
@@ -1170,6 +1187,9 @@ int mapcache_grid_get_cell(mapcache_context *ctx, mapcache_grid *grid, mapcache_
  * @return
  */
 void mapcache_tileset_tile_validate(mapcache_context *ctx, mapcache_tile *tile);
+void mapcache_tileset_tile_validate_z(mapcache_context *ctx, mapcache_tile *tile);
+void mapcache_tileset_tile_validate_x(mapcache_context *ctx, mapcache_tile *tile);
+void mapcache_tileset_tile_validate_y(mapcache_context *ctx, mapcache_tile *tile);
 
 /**
  * compute level for a given resolution
@@ -1306,8 +1326,17 @@ MS_DLL_EXPORT int mapcache_util_extract_int_list(mapcache_context *ctx, const ch
                                    int *numbers_count);
 MS_DLL_EXPORT int mapcache_util_extract_double_list(mapcache_context *ctx, const char* args, const char *sep, double **numbers,
                                       int *numbers_count);
-char *mapcache_util_str_replace(apr_pool_t *pool, const char *string, const char *substr,
+MS_DLL_EXPORT char *mapcache_util_str_replace(apr_pool_t *pool, const char *string, const char *substr,
                                 const char *replacement );
+char *mapcache_util_dbl_replace(apr_pool_t *pool, const char *string, const char *substr,
+                                double replacement );
+char *mapcache_util_str_replace_all(apr_pool_t *pool, const char *string, const char *substr,
+                                    const char *replacement );
+char *mapcache_util_dbl_replace_all(apr_pool_t *pool, const char *string, const char *substr,
+                                    double replacement );
+void mapcache_util_quadkey_decode(mapcache_context *ctx, const char *quadkey, int *x, int *y, int *z);
+
+char* mapcache_util_quadkey_encode(mapcache_context *ctx, int x, int y, int z);
 
 /**
  * \brief replace dangerous characters in string
@@ -1317,9 +1346,17 @@ char *mapcache_util_str_replace(apr_pool_t *pool, const char *string, const char
  * \return the original string if no matches were found, or the sanitized
  *         string allocated from the given pool
  */
-char* mapcache_util_str_sanitize(apr_pool_t *pool, const char *str, const char* from, char to);
+MS_DLL_EXPORT char* mapcache_util_str_sanitize(apr_pool_t *pool, const char *str, const char* from, char to);
 
-char* mapcache_util_get_tile_dimkey(mapcache_context *ctx, mapcache_tile *tile, char* sanitized_chars, char *sanitize_to);
+typedef enum {
+  MAPCACHE_UTIL_XML_SECTION_TEXT,
+  MAPCACHE_UTIL_XML_SECTION_ATTRIBUTE,
+  MAPCACHE_UTIL_XML_SECTION_COMMENT
+} mapcache_util_xml_section_type;
+
+char* mapcache_util_str_xml_escape(apr_pool_t *pool, const char *str, mapcache_util_xml_section_type xml_section_type);
+
+MS_DLL_EXPORT char* mapcache_util_get_tile_dimkey(mapcache_context *ctx, mapcache_tile *tile, char* sanitized_chars, char *sanitize_to);
 
 char* mapcache_util_get_tile_key(mapcache_context *ctx, mapcache_tile *tile, char *stemplate,
                                  char* sanitized_chars, char *sanitize_to);
@@ -1345,6 +1382,15 @@ typedef enum {
   MAPCACHE_PHOTOMETRIC_RGB,
   MAPCACHE_PHOTOMETRIC_YCBCR
 } mapcache_photometric;
+
+/**
+ * optimization settings (mostly) for jpeg
+ */
+typedef enum {
+  MAPCACHE_OPTIMIZE_NO,
+  MAPCACHE_OPTIMIZE_YES,
+  MAPCACHE_OPTIMIZE_ARITHMETIC
+} mapcache_optimization;
 
 /**\interface mapcache_image_format
  * \brief an image format
@@ -1389,9 +1435,15 @@ struct mapcache_image_format_mixed {
 
 mapcache_buffer* mapcache_empty_png_decode(mapcache_context *ctx, int width, int height, const unsigned char *hex_color, int *is_empty);
 
-
 mapcache_image_format* mapcache_imageio_create_mixed_format(apr_pool_t *pool,
     char *name, mapcache_image_format *transparent, mapcache_image_format *opaque, unsigned int alpha_cutoff);
+
+struct mapcache_image_format_raw {
+  mapcache_image_format format;
+};
+
+mapcache_image_format* mapcache_imageio_create_raw_format(apr_pool_t *pool, char *name, char *extension, char *mime_type); 
+int mapcache_imageio_is_raw_tileset(mapcache_tileset *tileset);
 
 /**\class mapcache_image_format_png_q
  * \brief Quantized PNG format
@@ -1454,10 +1506,11 @@ struct mapcache_image_format_jpeg {
   mapcache_image_format format;
   int quality; /**< JPEG quality, 1-100 */
   mapcache_photometric photometric;
+  mapcache_optimization optimize;
 };
 
 mapcache_image_format* mapcache_imageio_create_jpeg_format(apr_pool_t *pool, char *name, int quality,
-    mapcache_photometric photometric);
+    mapcache_photometric photometric, mapcache_optimization optimize);
 
 /**
  * @param r
@@ -1516,12 +1569,13 @@ void mapcache_tile_set_cached_dimension(mapcache_context *ctx, mapcache_tile *ti
 void mapcache_map_set_cached_dimension(mapcache_context *ctx, mapcache_map *map, const char *name, const char *value);
 void mapcache_tile_set_requested_dimension(mapcache_context *ctx, mapcache_tile *tile, const char *name, const char *value);
 void mapcache_map_set_requested_dimension(mapcache_context *ctx, mapcache_map *map, const char *name, const char *value);
-void mapcache_set_requested_dimension(mapcache_context *ctx, apr_array_header_t *dimensions, const char *name, const char *value);
-void mapcache_set_cached_dimension(mapcache_context *ctx, apr_array_header_t *dimensions, const char *name, const char *value);
+MS_DLL_EXPORT void mapcache_set_requested_dimension(mapcache_context *ctx, apr_array_header_t *dimensions, const char *name, const char *value);
+MS_DLL_EXPORT void mapcache_set_cached_dimension(mapcache_context *ctx, apr_array_header_t *dimensions, const char *name, const char *value);
 MS_DLL_EXPORT apr_array_header_t *mapcache_requested_dimensions_clone(apr_pool_t *pool, apr_array_header_t *src);
 
 struct mapcache_dimension {
   mapcache_dimension_type type;
+  int isTime;
   char *name;
   char *unit;
   apr_table_t *metadata;
@@ -1530,7 +1584,14 @@ struct mapcache_dimension {
   /**
    * \brief return the list of dimension values that match the requested entry
    */
-  apr_array_header_t* (*get_entries_for_value)(mapcache_context *ctx, mapcache_dimension *dimension, const char *value,
+  apr_array_header_t* (*_get_entries_for_value)(mapcache_context *ctx, mapcache_dimension *dimension, const char *value,
+                       mapcache_tileset *tileset, mapcache_extent *extent, mapcache_grid *grid);
+
+  /**
+   * \brief return the list of dimension values that match the requested time range
+   */
+  apr_array_header_t* (*_get_entries_for_time_range)(mapcache_context *ctx, mapcache_dimension *dimension, const char *value,
+                       time_t start, time_t end,
                        mapcache_tileset *tileset, mapcache_extent *extent, mapcache_grid *grid);
 
   /**
@@ -1553,8 +1614,15 @@ struct mapcache_dimension {
 
 mapcache_dimension* mapcache_dimension_values_create(mapcache_context *ctx, apr_pool_t *pool);
 mapcache_dimension* mapcache_dimension_sqlite_create(mapcache_context *ctx, apr_pool_t *pool);
+mapcache_dimension* mapcache_dimension_postgresql_create(mapcache_context *ctx, apr_pool_t *pool);
 mapcache_dimension* mapcache_dimension_regex_create(mapcache_context *ctx, apr_pool_t *pool);
 mapcache_dimension* mapcache_dimension_time_create(mapcache_context *ctx, apr_pool_t *pool);
+mapcache_dimension* mapcache_dimension_elasticsearch_create(mapcache_context *ctx, apr_pool_t *pool);
+
+MS_DLL_EXPORT apr_array_header_t* mapcache_dimension_get_entries_for_value(mapcache_context *ctx, mapcache_dimension *dimension, const char *value,
+                       mapcache_tileset *tileset, mapcache_extent *extent, mapcache_grid *grid);
+apr_array_header_t* mapcache_dimension_time_get_entries_for_value(mapcache_context *ctx, mapcache_dimension *dimension, const char *value,
+                       mapcache_tileset *tileset, mapcache_extent *extent, mapcache_grid *grid);
 
 int mapcache_is_axis_inverted(const char *srs);
 

@@ -100,6 +100,7 @@ struct mapcache_cache_rest {
   int use_redirects;
   int timeout;
   int connection_timeout;
+  int detect_blank;
   mapcache_rest_provider provider;
 };
 
@@ -195,7 +196,11 @@ static void _set_headers(mapcache_context *ctx, CURL *curl, apr_table_t *headers
     apr_table_entry_t *elts = (apr_table_entry_t *) array->elts;
     int i;
     for (i = 0; i < array->nelts; i++) {
-      curl_headers = curl_slist_append(curl_headers, apr_pstrcat(ctx->pool,elts[i].key,": ",elts[i].val,NULL));
+      if(strlen(elts[i].val) > 0) {
+        curl_headers = curl_slist_append(curl_headers, apr_pstrcat(ctx->pool,elts[i].key,": ",elts[i].val,NULL));
+      } else {
+        curl_headers = curl_slist_append(curl_headers, apr_pstrcat(ctx->pool,elts[i].key,":",NULL));
+      }
     }
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, curl_headers);
   }
@@ -219,7 +224,6 @@ static void _put_request(mapcache_context *ctx, CURL *curl, mapcache_buffer *buf
   apr_table_unset(headers, "Content-Length");
 #endif
 
-  _set_headers(ctx, curl, headers);
 
   curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1);
 
@@ -231,6 +235,10 @@ static void _put_request(mapcache_context *ctx, CURL *curl, mapcache_buffer *buf
 
   /* HTTP PUT please */
   curl_easy_setopt(curl, CURLOPT_PUT, 1L);
+
+  /* don't use an Expect: 100 Continue header */
+  apr_table_set(headers, "Expect", "");
+  _set_headers(ctx, curl, headers);
 
   /* specify target URL, and note that this URL should include a file
    *        name, not only a directory */
@@ -308,12 +316,13 @@ static int _delete_request(mapcache_context *ctx, CURL *curl, char *url, apr_tab
   curl_easy_setopt(curl, CURLOPT_URL, url);
 
   curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "DELETE");
+  curl_easy_setopt(curl, CURLOPT_NOBODY, 1);
 
   /* Now run off and do what you've been told! */
   res = curl_easy_perform(curl);
   /* Check for errors */
   if(res != CURLE_OK) {
-    ctx->set_error(ctx, 500, "curl_easy_perform() failed in rest head %s",curl_easy_strerror(res));
+    ctx->set_error(ctx, 500, "curl_easy_perform() failed in rest delete %s",curl_easy_strerror(res));
     http_code = 500;
   } else {
     curl_easy_getinfo (curl, CURLINFO_RESPONSE_CODE, &http_code);
@@ -631,6 +640,13 @@ static void header_gnome_sort(char **headers, int size)
     }
 }
 
+static const char* my_apr_table_get(apr_table_t *t, char *key) {
+  const char *val = apr_table_get(t,key);
+  if(!val) val = "";
+  return val;
+}
+
+
 static void _mapcache_cache_google_headers_add(mapcache_context *ctx, const char* method, mapcache_cache_rest *rcache, mapcache_tile *tile, char *url, apr_table_t *headers)
 {
   char *stringToSign, **aheaders, *resource = url, x_amz_date[64];
@@ -659,11 +675,10 @@ static void _mapcache_cache_google_headers_add(mapcache_context *ctx, const char
     apr_table_set(headers, "Content-MD5", b64);
   }
 
-  head = apr_table_get(headers, "Content-MD5");
-  if(!head) head = "";
+  head = my_apr_table_get(headers, "Content-MD5");
   stringToSign=apr_pstrcat(ctx->pool, method, "\n", head, "\n", NULL);
-  head = apr_table_get(headers, "Content-Type");
-  if(!head) head = ""; stringToSign=apr_pstrcat(ctx->pool, stringToSign, head, "\n", NULL);
+  head = my_apr_table_get(headers, "Content-Type");
+  stringToSign=apr_pstrcat(ctx->pool, stringToSign, head, "\n", NULL);
 
   /* Date: header, left empty as we are using x-amz-date */
   stringToSign=apr_pstrcat(ctx->pool, stringToSign, "\n", NULL);
@@ -708,6 +723,7 @@ static void _mapcache_cache_google_headers_add(mapcache_context *ctx, const char
 
   apr_table_set( headers, "Authorization", apr_pstrcat(ctx->pool,"AWS ", google->access, ":", b64, NULL));
 }
+
 static void _mapcache_cache_azure_headers_add(mapcache_context *ctx, const char* method, mapcache_cache_rest *rcache, mapcache_tile *tile, char *url, apr_table_t *headers)
 {
   char *stringToSign, **aheaders, *canonical_headers="", *canonical_resource=NULL, *resource = url, x_ms_date[64];
@@ -732,28 +748,28 @@ static void _mapcache_cache_azure_headers_add(mapcache_context *ctx, const char*
   apr_table_set(headers,"x-ms-blob-type","BlockBlob");
 
   stringToSign = apr_pstrcat(ctx->pool, method, "\n", NULL);
-  head = apr_table_get(headers, "Content-Encoding");
-  if(!head) head = ""; stringToSign=apr_pstrcat(ctx->pool, stringToSign, head, "\n", NULL);
-  head = apr_table_get(headers, "Content-Language");
-  if(!head) head = ""; stringToSign=apr_pstrcat(ctx->pool, stringToSign, head, "\n", NULL);
-  head = apr_table_get(headers, "Content-Length");
-  if(!head) head = ""; stringToSign=apr_pstrcat(ctx->pool, stringToSign, head, "\n", NULL);
-  head = apr_table_get(headers, "Content-MD5");
-  if(!head) head = ""; stringToSign=apr_pstrcat(ctx->pool, stringToSign, head, "\n", NULL);
-  head = apr_table_get(headers, "Content-Type");
-  if(!head) head = ""; stringToSign=apr_pstrcat(ctx->pool, stringToSign, head, "\n", NULL);
-  head = apr_table_get(headers, "Date");
-  if(!head) head = ""; stringToSign=apr_pstrcat(ctx->pool, stringToSign, head, "\n", NULL);
-  head = apr_table_get(headers, "If-Modified-Since");
-  if(!head) head = ""; stringToSign=apr_pstrcat(ctx->pool, stringToSign, head, "\n", NULL);
-  head = apr_table_get(headers, "If-Match");
-  if(!head) head = ""; stringToSign=apr_pstrcat(ctx->pool, stringToSign, head, "\n", NULL);
-  head = apr_table_get(headers, "If-None-Match");
-  if(!head) head = ""; stringToSign=apr_pstrcat(ctx->pool, stringToSign, head, "\n", NULL);
-  head = apr_table_get(headers, "If-Unmodified-Since");
-  if(!head) head = ""; stringToSign=apr_pstrcat(ctx->pool, stringToSign, head, "\n", NULL);
-  head = apr_table_get(headers, "Range");
-  if(!head) head = ""; stringToSign=apr_pstrcat(ctx->pool, stringToSign, head, "\n", NULL);
+  head = my_apr_table_get(headers, "Content-Encoding");
+  stringToSign=apr_pstrcat(ctx->pool, stringToSign, head, "\n", NULL);
+  head = my_apr_table_get(headers, "Content-Language");
+  stringToSign=apr_pstrcat(ctx->pool, stringToSign, head, "\n", NULL);
+  head = my_apr_table_get(headers, "Content-Length");
+  stringToSign=apr_pstrcat(ctx->pool, stringToSign, head, "\n", NULL);
+  head = my_apr_table_get(headers, "Content-MD5");
+  stringToSign=apr_pstrcat(ctx->pool, stringToSign, head, "\n", NULL);
+  head = my_apr_table_get(headers, "Content-Type");
+  stringToSign=apr_pstrcat(ctx->pool, stringToSign, head, "\n", NULL);
+  head = my_apr_table_get(headers, "Date");
+  stringToSign=apr_pstrcat(ctx->pool, stringToSign, head, "\n", NULL);
+  head = my_apr_table_get(headers, "If-Modified-Since");
+  stringToSign=apr_pstrcat(ctx->pool, stringToSign, head, "\n", NULL);
+  head = my_apr_table_get(headers, "If-Match");
+  stringToSign=apr_pstrcat(ctx->pool, stringToSign, head, "\n", NULL);
+  head = my_apr_table_get(headers, "If-None-Match");
+  stringToSign=apr_pstrcat(ctx->pool, stringToSign, head, "\n", NULL);
+  head = my_apr_table_get(headers, "If-Unmodified-Since");
+  stringToSign=apr_pstrcat(ctx->pool, stringToSign, head, "\n", NULL);
+  head = my_apr_table_get(headers, "Range");
+  stringToSign=apr_pstrcat(ctx->pool, stringToSign, head, "\n", NULL);
 
   ahead = apr_table_elts(headers);
   aheaders = apr_pcalloc(ctx->pool, ahead->nelts * sizeof(char*));
@@ -1070,7 +1086,7 @@ static void _mapcache_cache_rest_delete(mapcache_context *ctx, mapcache_cache *p
   }
   mapcache_connection_pool_release_connection(ctx,pc);
 
-  if(status!=200 && status!=202 && status!=204) {
+  if(status!=200 && status!=202 && status!=204 && status!=404 && status!=410) {
     //ctx->set_error(ctx,500,"rest delete returned code %d", status);
   }
 }
@@ -1133,6 +1149,24 @@ static void _mapcache_cache_rest_set(mapcache_context *ctx, mapcache_cache *pcac
   apr_table_t *headers;
   mapcache_pooled_connection *pc;
   CURL *curl;
+
+
+  if(rcache->detect_blank) {
+    if(tile->nodata) {
+      return;
+    }
+    if(!tile->raw_image) {
+      tile->raw_image = mapcache_imageio_decode(ctx, tile->encoded_data);
+      GC_CHECK_ERROR(ctx);
+    }
+    if(mapcache_image_blank_color(tile->raw_image) != MAPCACHE_FALSE) {
+      if(tile->raw_image->data[3] == 0) {
+        /* We have a blank (uniform) image who's first pixel is fully transparent, thus the whole image is transparent */
+        tile->nodata = 1;
+        return;
+      }
+    }
+  }
 
   _mapcache_cache_rest_tile_url(ctx, tile, &rcache->rest, &rcache->rest.set_tile, &url);
   headers = _mapcache_cache_rest_headers(ctx, tile, &rcache->rest, &rcache->rest.set_tile);
@@ -1228,7 +1262,14 @@ static void _mapcache_cache_rest_configuration_parse_xml(mapcache_context *ctx, 
   } else {
     dcache->timeout = 120;
   }
-  
+
+  dcache->detect_blank = 0;
+  if ((cur_node = ezxml_child(node, "detect_blank")) != NULL) {
+    if(strcasecmp(cur_node->txt,"false")) {
+      dcache->detect_blank = 1;
+    }
+  }
+
   if ((cur_node = ezxml_child(node,"headers")) != NULL) {
     ezxml_t header_node;
     dcache->rest.common_headers = apr_table_make(ctx->pool,3);
