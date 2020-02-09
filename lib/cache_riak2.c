@@ -31,8 +31,9 @@
 #ifdef USE_RIAK
 
 #include <riack.h>
-//ugly way to detect if we are using Riack 1.4
-#ifndef RSTR_HAS_CONTENT_P
+
+//ugly way to detect if we are using Riack > 1.4
+#ifdef RSTR_HAS_CONTENT_P
 
 #include <apr_strings.h>
 #include <apr_reslist.h>
@@ -50,13 +51,21 @@ typedef struct mapcache_cache_riak mapcache_cache_riak;
 struct mapcache_cache_riak {
    mapcache_cache cache;
    char *host;
+   char *ciphers;
+   char *ca_file;
+   char *cert_file;
+   char *key_file;
    int port;
    char *key_template;
    char *bucket_template;
+   char *bucket_type_template;
    int keep_alive;
    int r;
    int w;
+   int session_timeout;
    int detect_blank;
+   riack_string *user;
+   riack_string *password;
 };
 
 struct riak_conn_params {
@@ -65,9 +74,12 @@ struct riak_conn_params {
 
 void mapcache_riak_connection_constructor(mapcache_context *ctx, void **conn_, void *params) {
     mapcache_cache_riak *cache = ((struct riak_conn_params*)params)->cache;
-    struct RIACK_CONNECTION_OPTIONS options;
-    struct RIACK_CLIENT *client = riack_new_client(0);
-    
+    riack_connection_options options;
+#ifdef RIACK_HAVE_SECURITY
+    riack_security_options security;
+#endif
+    riack_client *client = riack_new_client(0);
+
     if (client == NULL) {
         ctx->set_error(ctx,500,"failed to riack_new_client(0)");
         return;
@@ -76,11 +88,36 @@ void mapcache_riak_connection_constructor(mapcache_context *ctx, void **conn_, v
     options.recv_timeout_ms = 2000;
     options.send_timeout_ms = 2000;
     options.keep_alive_enabled = cache->keep_alive;
+
     if (riack_connect(client, cache->host, cache->port, &options) != RIACK_SUCCESS) {
         riack_free(client);
         ctx->set_error(ctx,500,"failed to riack_connect()");
         return;
     }
+
+#ifdef RIACK_HAVE_SECURITY
+    if (cache->user) {
+        /* If user is set start TLS and perform authentication */
+        riack_init_security_options(&security);
+        security.ca_file = cache->ca_file;
+        security.key_file = cache->key_file;
+        security.cert_file = cache->cert_file;
+        security.ciphers = cache->ciphers;
+        security.session_timeout = cache->session_timeout;
+
+        if (riack_start_tls(client, &security) != RIACK_SUCCESS) {
+            riack_free(client);
+            ctx->set_error(ctx,500,"failed to riack_start_tls(), check certificates, ciphers");
+            return;
+        }
+
+        if (riack_auth(client, cache->user, cache->password) != RIACK_SUCCESS) {
+            riack_free(client);
+            ctx->set_error(ctx,500,"failed to riack_auth(), check user, password");
+            return;
+        }
+    }
+#endif
 
     if (riack_ping(client) != RIACK_SUCCESS) {
         riack_free(client);
@@ -92,7 +129,7 @@ void mapcache_riak_connection_constructor(mapcache_context *ctx, void **conn_, v
 }
 
 void mapcache_riak_connection_destructor(void *conn_) {
-    struct RIACK_CLIENT *client = (struct RIACK_CLIENT *)conn_;
+    riack_client *client = (riack_client *)conn_;
     riack_free(client);
 }
 
@@ -109,16 +146,62 @@ static mapcache_pooled_connection* _riak_get_connection(mapcache_context *ctx, m
   return pc;
 }
 
+static char* string_from_template(mapcache_context *ctx, mapcache_tile *tile, char *template_string) {
+    if (strchr(template_string,'{')) {
+        return mapcache_util_get_tile_key(ctx, tile, template_string, " \r\n\t\f\e\a\b", "#");
+    } else {
+        return template_string;
+    }
+}
+
+static int mapcache_riak_reconnect(mapcache_context *ctx, mapcache_cache_riak *cache, riack_client *client) {
+    /* try to reconnect to riak and reauthenticate if needed */
+#ifdef RIACK_HAVE_SECURITY
+    riack_security_options security;
+#endif
+
+    if(riack_reconnect(client) != RIACK_SUCCESS) {
+        ctx->set_error(ctx,500,"failed to riack_reconnect()");
+        return MAPCACHE_FAILURE;
+    }
+
+#ifdef RIACK_HAVE_SECURITY
+    if (cache->user) {
+        /* If user is set start TLS and perform authentication */
+        riack_init_security_options(&security);
+        security.ca_file = cache->ca_file;
+        security.key_file = cache->key_file;
+        security.cert_file = cache->cert_file;
+        security.ciphers = cache->ciphers;
+        security.session_timeout = cache->session_timeout;
+
+        if (riack_start_tls(client, &security) != RIACK_SUCCESS) {
+            ctx->set_error(ctx,500,"failed to riack_start_tls() on reconnect");
+            return MAPCACHE_FAILURE;
+        }
+
+        if (riack_auth(client, cache->user, cache->password) != RIACK_SUCCESS) {
+            ctx->set_error(ctx,500,"failed to riack_auth() on reconnect");
+            return MAPCACHE_FAILURE;
+        }
+    }
+#endif
+
+    return MAPCACHE_SUCCESS;
+}
+
 static int _mapcache_cache_riak_has_tile(mapcache_context *ctx, mapcache_cache *pcache, mapcache_tile *tile) {
     int error;
-    int connect_error = RIACK_SUCCESS;
-	  int retries = 3;
-    RIACK_STRING key,bucket;
-    struct RIACK_GET_OBJECT obj;
-    struct RIACK_CLIENT *client;
-    struct RIACK_GET_PROPERTIES properties;
+    int connect_error = MAPCACHE_SUCCESS;
+    int retries = 3;
+    riack_string key,bucket,bucket_type,*pbucket_type = NULL;
+    riack_get_object *obj = NULL;
+    riack_client *client;
+    riack_get_properties properties;
     mapcache_pooled_connection *pc;
     mapcache_cache_riak *cache = (mapcache_cache_riak*)pcache;
+
+    memset(&properties, 0, sizeof(riack_get_properties));
 
     key.value = mapcache_util_get_tile_key(ctx, tile, cache->key_template, " \r\n\t\f\e\a\b", "#");
     if (GC_HAS_ERROR(ctx)) {
@@ -126,12 +209,20 @@ static int _mapcache_cache_riak_has_tile(mapcache_context *ctx, mapcache_cache *
     }
     key.len = strlen(key.value);
 
-    if(strchr(cache->bucket_template,'{')) {
-      bucket.value = mapcache_util_get_tile_key(ctx, tile, cache->bucket_template, " \r\n\t\f\e\a\b", "#");
-    } else {
-      bucket.value = cache->bucket_template;
+    bucket.value = string_from_template(ctx, tile, cache->bucket_template);
+    if (GC_HAS_ERROR(ctx)) {
+        return MAPCACHE_FALSE;
     }
     bucket.len = strlen(bucket.value);
+
+    if (cache->bucket_type_template) {
+        bucket_type.value = string_from_template(ctx, tile, cache->bucket_type_template);
+        if (GC_HAS_ERROR(ctx)) {
+            return MAPCACHE_FALSE;
+        }
+        bucket_type.len = strlen(bucket_type.value);
+        pbucket_type = &bucket_type;
+    }
 
     pc = _riak_get_connection(ctx, cache, tile);
     if (GC_HAS_ERROR(ctx)) {
@@ -139,22 +230,20 @@ static int _mapcache_cache_riak_has_tile(mapcache_context *ctx, mapcache_cache *
     }
     client = pc->connection;
 
-    memset(&properties, 0, sizeof(struct RIACK_GET_PROPERTIES));
-
     if (cache->r > 0) {
         /* Override bucket defaults */
         properties.r = cache->r;
         properties.r_use = 1;
     }
 
-	do
+    do
     {
-        error = riack_get(client, bucket, key, &properties, &obj);
+        error = riack_get_ext(client, &bucket, &key, &properties, pbucket_type, &obj, 0);
         if (error != RIACK_SUCCESS) {
             ctx->log(ctx, MAPCACHE_WARN, "Retry %d in riak_has_tile for tile %s from cache %s due to error %d", (4-retries), key.value, cache->cache.name, error);
-            for (connect_error = riack_reconnect(client);
-                 connect_error != RIACK_SUCCESS && retries > 0;
-                 connect_error = riack_reconnect(client))
+            for (connect_error = mapcache_riak_reconnect(ctx, cache, client);
+                 connect_error != MAPCACHE_SUCCESS && retries > 0;
+                 connect_error = mapcache_riak_reconnect(ctx, cache, client))
             {
               --retries;
             }
@@ -165,23 +254,23 @@ static int _mapcache_cache_riak_has_tile(mapcache_context *ctx, mapcache_cache *
     while (error != RIACK_SUCCESS && retries >= 0);
 
     if (error != RIACK_SUCCESS) {
-        riack_free_get_object(client, &obj);    // riack_get allocates the returned object so we need to deallocate it.
-        if (connect_error != RIACK_SUCCESS)
+        riack_free_get_object_p(client, &obj);    // riack_get allocates the returned object so we need to deallocate it.
+        if (connect_error != MAPCACHE_SUCCESS)
             mapcache_connection_pool_invalidate_connection(ctx,pc);
         else
             mapcache_connection_pool_release_connection(ctx,pc);
 
-        ctx->set_error(ctx, 500, "riak: failed to get key %s: %d", key, error);
+        ctx->set_error(ctx, 500, "riak: failed to get key %s: %d", key.value, error);
         return MAPCACHE_FALSE;
     }
 
-    if (obj.object.content_count < 1 || obj.object.content[0].data_len == 0) {
+    if (obj->object.content_count < 1 || obj->object.content[0].data_len == 0) {
       error = MAPCACHE_FALSE;
     } else {
       error = MAPCACHE_TRUE;
     }
 
-    riack_free_get_object(client, &obj);    // riack_get allocates the returned object so we need to deallocate it.
+    riack_free_get_object_p(client, &obj);    // riack_get allocates the returned object so we need to deallocate it.
     mapcache_connection_pool_release_connection(ctx,pc);
 
     return error;
@@ -189,27 +278,30 @@ static int _mapcache_cache_riak_has_tile(mapcache_context *ctx, mapcache_cache *
 
 static void _mapcache_cache_riak_delete(mapcache_context *ctx, mapcache_cache *pcache, mapcache_tile *tile) {
     int error;
-    int connect_error = RIACK_SUCCESS;
+    int connect_error = MAPCACHE_SUCCESS;
     int retries = 3;
-    RIACK_STRING key,bucket;
-    struct RIACK_CLIENT *client;
-    struct RIACK_DEL_PROPERTIES properties;
+    riack_string key,bucket,bucket_type,*pbucket_type = NULL;
+    riack_client *client;
+    riack_del_properties properties;
     mapcache_pooled_connection *pc;
     mapcache_cache_riak *cache = (mapcache_cache_riak*)pcache;
 
-    memset(&properties, 0, sizeof(struct RIACK_DEL_PROPERTIES));
-
+    memset(&properties, 0, sizeof(riack_del_properties));
 
     key.value = mapcache_util_get_tile_key(ctx, tile, cache->key_template, " \r\n\t\f\e\a\b", "#");
     GC_CHECK_ERROR(ctx);
     key.len = strlen(key.value);
 
-    if(strchr(cache->bucket_template,'{')) {
-      bucket.value = mapcache_util_get_tile_key(ctx, tile, cache->bucket_template, " \r\n\t\f\e\a\b", "#");
-    } else {
-      bucket.value = cache->bucket_template;
-    }
+    bucket.value = string_from_template(ctx, tile, cache->bucket_template);
+    GC_CHECK_ERROR(ctx);
     bucket.len = strlen(bucket.value);
+
+    if (cache->bucket_type_template) {
+        bucket_type.value = string_from_template(ctx, tile, cache->bucket_type_template);
+        GC_CHECK_ERROR(ctx);
+        bucket_type.len = strlen(bucket_type.value);
+        pbucket_type = &bucket_type;
+    }
 
     pc = _riak_get_connection(ctx, cache, tile);
     GC_CHECK_ERROR(ctx);
@@ -220,12 +312,12 @@ static void _mapcache_cache_riak_delete(mapcache_context *ctx, mapcache_cache *p
 
     do
     {
-        error = riack_delete(client, bucket, key, &properties);
+        error = riack_delete_ext(client, &bucket, pbucket_type, &key, &properties, 0);
         if (error != RIACK_SUCCESS) {
             ctx->log(ctx, MAPCACHE_WARN, "Retry %d in riak_delete for tile %s from cache %s due to error %d", (4-retries), key.value, cache->cache.name, error);
-            for (connect_error = riack_reconnect(client);
-                 connect_error != RIACK_SUCCESS && retries > 0;
-                 connect_error = riack_reconnect(client))
+            for (connect_error = mapcache_riak_reconnect(ctx, cache, client);
+                 connect_error != MAPCACHE_SUCCESS && retries > 0;
+                 connect_error = mapcache_riak_reconnect(ctx, cache, client))
             {
               --retries;
             }
@@ -235,13 +327,13 @@ static void _mapcache_cache_riak_delete(mapcache_context *ctx, mapcache_cache *p
     }
     while (error != RIACK_SUCCESS && retries >= 0);
 
-    if (connect_error != RIACK_SUCCESS)
+    if (connect_error != MAPCACHE_SUCCESS)
         mapcache_connection_pool_invalidate_connection(ctx,pc);
     else
         mapcache_connection_pool_release_connection(ctx,pc);
 
     if (error != RIACK_SUCCESS) {
-        ctx->set_error(ctx, 500, "riak: failed to delete key %s: %d", key, error);
+        ctx->set_error(ctx, 500, "riak: failed to delete key %s: %d", key.value, error);
     }
 }
 
@@ -254,22 +346,16 @@ static void _mapcache_cache_riak_delete(mapcache_context *ctx, mapcache_cache *p
  */
 static int _mapcache_cache_riak_get(mapcache_context *ctx, mapcache_cache *pcache, mapcache_tile *tile) {
     int error;
-    int connect_error = RIACK_SUCCESS;
+    int connect_error = MAPCACHE_SUCCESS;
     int retries = 3;
-    RIACK_STRING key,bucket;
-    struct RIACK_GET_OBJECT obj;
-    struct RIACK_GET_PROPERTIES properties;
-    struct RIACK_CLIENT *client;
+    riack_string key,bucket,bucket_type,*pbucket_type = NULL;
+    riack_get_object *obj = NULL;
+    riack_get_properties properties;
+    riack_client *client;
     mapcache_pooled_connection *pc;
     mapcache_cache_riak *cache = (mapcache_cache_riak*)pcache;
 
-    memset(&properties, 0, sizeof(struct RIACK_GET_PROPERTIES));
-
-    if (cache->r > 0) {
-        /* Override bucket defaults */
-        properties.r = cache->r;
-        properties.r_use = 1;
-    }
+    memset(&properties, 0, sizeof(riack_get_properties));
 
     key.value = mapcache_util_get_tile_key(ctx, tile, cache->key_template, " \r\n\t\f\e\a\b", "#");
     if (GC_HAS_ERROR(ctx)) {
@@ -277,13 +363,20 @@ static int _mapcache_cache_riak_get(mapcache_context *ctx, mapcache_cache *pcach
     }
     key.len = strlen(key.value);
 
-    if(strchr(cache->bucket_template,'{')) {
-      bucket.value = mapcache_util_get_tile_key(ctx, tile, cache->bucket_template, " \r\n\t\f\e\a\b", "#");
-    } else {
-      bucket.value = cache->bucket_template;
+    bucket.value = string_from_template(ctx, tile, cache->bucket_template);
+    if (GC_HAS_ERROR(ctx)) {
+        return MAPCACHE_FAILURE;
     }
     bucket.len = strlen(bucket.value);
 
+    if (cache->bucket_type_template) {
+        bucket_type.value = string_from_template(ctx, tile, cache->bucket_type_template);
+        if (GC_HAS_ERROR(ctx)) {
+            return MAPCACHE_FAILURE;
+        }
+        bucket_type.len = strlen(bucket_type.value);
+        pbucket_type = &bucket_type;
+    }
 
     pc = _riak_get_connection(ctx, cache, tile);
     if (GC_HAS_ERROR(ctx)) {
@@ -291,17 +384,23 @@ static int _mapcache_cache_riak_get(mapcache_context *ctx, mapcache_cache *pcach
     }
     client = pc->connection;
 
+    if (cache->r > 0) {
+        /* Override bucket defaults */
+        properties.r = cache->r;
+        properties.r_use = 1;
+    }
+
     // If we get an error it is advised that we call reconnect.  It also appears
     // that every now and then we get an error and need to retry once again to
     // get it to work.
     do
     {
-        error = riack_get(client, bucket, key, &properties, &obj);
+        error = riack_get_ext(client, &bucket, &key, &properties, pbucket_type, &obj, 0);
         if (error != RIACK_SUCCESS) {
             ctx->log(ctx, MAPCACHE_WARN, "Retry %d in riak_get for tile %s from cache %s due to error %d", (4-retries), key.value, cache->cache.name, error);
-            for (connect_error = riack_reconnect(client);
-                 connect_error != RIACK_SUCCESS && retries > 0;
-                 connect_error = riack_reconnect(client))
+            for (connect_error = mapcache_riak_reconnect(ctx, cache, client);
+                 connect_error != MAPCACHE_SUCCESS && retries > 0;
+                 connect_error = mapcache_riak_reconnect(ctx, cache, client))
             {
               --retries;
             }
@@ -313,8 +412,8 @@ static int _mapcache_cache_riak_get(mapcache_context *ctx, mapcache_cache *pcach
 
     if (error != RIACK_SUCCESS)
     {
-        riack_free_get_object(client, &obj);    // riack_get allocates the returned object so we need to deallocate it.
-        if (connect_error != RIACK_SUCCESS)
+        riack_free_get_object_p(client, &obj);    // riack_get allocates the returned object so we need to deallocate it.
+        if (connect_error != MAPCACHE_SUCCESS)
             mapcache_connection_pool_invalidate_connection(ctx,pc);
         else
             mapcache_connection_pool_release_connection(ctx,pc);
@@ -326,32 +425,32 @@ static int _mapcache_cache_riak_get(mapcache_context *ctx, mapcache_cache *pcach
     // Check if tile exists.  If it doesn't we need to return CACHE_MISS or things go wrong.
     // Mapcache doesn't appear to use the has_tile function and uses _get instead so we need
     // to do this sort of test here instead of erroring.
-    if (obj.object.content_count < 1 || obj.object.content[0].data_len == 0) {
-        riack_free_get_object(client, &obj);  // Need to free the object here as well.
+    if (obj->object.content_count < 1 || obj->object.content[0].data_len == 0) {
+        riack_free_get_object_p(client, &obj);  // Need to free the object here as well.
         mapcache_connection_pool_release_connection(ctx,pc);
         return MAPCACHE_CACHE_MISS;
     }
 
     tile->encoded_data = mapcache_buffer_create(0, ctx->pool);
 
-    if(((char*)(obj.object.content[0].data))[0] == '#' && obj.object.content[0].data_len == 5 &&
-       sizeof("image/mapcache-rgba") - 1 == obj.object.content[0].content_type.len &&
-       !strncmp("image/mapcache-rgba", obj.object.content[0].content_type.value, obj.object.content[0].content_type.len)) {
+    if(((char*)(obj->object.content[0].data))[0] == '#' && obj->object.content[0].data_len == 5 &&
+       sizeof("image/mapcache-rgba") - 1 == obj->object.content[0].content_type.len &&
+       !strncmp("image/mapcache-rgba", obj->object.content[0].content_type.value, obj->object.content[0].content_type.len)) {
         // Create blank tile
-        tile->encoded_data = mapcache_empty_png_decode(ctx, tile->grid_link->grid->tile_sx, tile->grid_link->grid->tile_sy, (unsigned char*)obj.object.content[0].data, &tile->nodata);
+        tile->encoded_data = mapcache_empty_png_decode(ctx, tile->grid_link->grid->tile_sx, tile->grid_link->grid->tile_sy, (unsigned char*)obj->object.content[0].data, &tile->nodata);
     } else {
         // Copy the data into the buffer
-        mapcache_buffer_append(tile->encoded_data, obj.object.content[0].data_len, obj.object.content[0].data);
+        mapcache_buffer_append(tile->encoded_data, obj->object.content[0].data_len, obj->object.content[0].data);
     }
 
     // Get modified time
-    if (obj.object.content[0].last_modified_present && obj.object.content[0].last_modified_usecs_present) {
-        tile->mtime = apr_time_make(obj.object.content[0].last_modified, obj.object.content[0].last_modified_usecs);
-    } else if (obj.object.content[0].last_modified_present) {
-        tile->mtime = apr_time_make(obj.object.content[0].last_modified, 0);
+    if (obj->object.content[0].last_modified_present && obj->object.content[0].last_modified_usecs_present) {
+        tile->mtime = apr_time_make(obj->object.content[0].last_modified, obj->object.content[0].last_modified_usecs);
+    } else if (obj->object.content[0].last_modified_present) {
+        tile->mtime = apr_time_make(obj->object.content[0].last_modified, 0);
     }
 
-    riack_free_get_object(client, &obj);    // riack_get allocates the returned object so we need to deallocate it.
+    riack_free_get_object_p(client, &obj);    // riack_get allocates the returned object so we need to deallocate it.
 
     mapcache_connection_pool_release_connection(ctx,pc);
 
@@ -368,38 +467,33 @@ static int _mapcache_cache_riak_get(mapcache_context *ctx, mapcache_cache *pcach
 static void _mapcache_cache_riak_set(mapcache_context *ctx, mapcache_cache *pcache, mapcache_tile *tile) {
     char *key,*content_type = NULL;
     int error;
-    int connect_error = RIACK_SUCCESS;
+    int connect_error = MAPCACHE_SUCCESS;
     int retries = 3;
-    struct RIACK_OBJECT object;
-    struct RIACK_CONTENT content;
-    struct RIACK_PUT_PROPERTIES properties;
-    struct RIACK_CLIENT *client;
-    RIACK_STRING bucket;
+    riack_object object;
+    riack_content content;
+    riack_client *client;
+    riack_string bucket,bucket_type,*pbucket_type = NULL;
+    riack_put_properties properties;
     mapcache_pooled_connection *pc;
     mapcache_cache_riak *cache = (mapcache_cache_riak*)pcache;
 
-    memset(&content, 0, sizeof(struct RIACK_CONTENT));
-    memset(&object, 0, sizeof(struct RIACK_OBJECT));
-    memset(&properties, 0, sizeof(struct RIACK_PUT_PROPERTIES));
-
-    if (cache->w > 0) {
-        /* Override bucket defaults */
-        properties.w = cache->w;
-        properties.w_use = 1;
-        /* Set dw to w, as dw is not demoted to w by default */
-        properties.dw = cache->w;
-        properties.dw_use = 1;
-    }
+    memset(&content, 0, sizeof(riack_content));
+    memset(&object, 0, sizeof(riack_object));
+    memset(&properties, 0, sizeof(riack_put_properties));
 
     key = mapcache_util_get_tile_key(ctx, tile, cache->key_template, " \r\n\t\f\e\a\b", "#");
     GC_CHECK_ERROR(ctx);
 
-    if(strchr(cache->bucket_template,'{')) {
-      bucket.value = mapcache_util_get_tile_key(ctx, tile, cache->bucket_template, " \r\n\t\f\e\a\b", "#");
-    } else {
-      bucket.value = cache->bucket_template;
-    }
+    bucket.value = string_from_template(ctx, tile, cache->bucket_template);
+    GC_CHECK_ERROR(ctx);
     bucket.len = strlen(bucket.value);
+
+    if (cache->bucket_type_template) {
+        bucket_type.value = string_from_template(ctx, tile, cache->bucket_type_template);
+        GC_CHECK_ERROR(ctx);
+        bucket_type.len = strlen(bucket_type.value);
+        pbucket_type = &bucket_type;
+    }
 
     // Blank tile detection
     if(cache->detect_blank) {
@@ -426,12 +520,12 @@ static void _mapcache_cache_riak_set(mapcache_context *ctx, mapcache_cache *pcac
     }
 
     if(!content_type) {
-      /* compute the content-type */
-      mapcache_image_format_type t = mapcache_imageio_header_sniff(ctx,tile->encoded_data);
-      if(t == GC_PNG)
-        content_type = "image/png";
-      else if(t == GC_JPEG)
-        content_type = "image/jpeg";
+        /* compute the content-type */
+        mapcache_image_format_type t = mapcache_imageio_header_sniff(ctx,tile->encoded_data);
+        if(t == GC_PNG)
+            content_type = "image/png";
+        else if(t == GC_JPEG)
+            content_type = "image/jpeg";
     }
 
     pc = _riak_get_connection(ctx, cache, tile);
@@ -450,17 +544,26 @@ static void _mapcache_cache_riak_set(mapcache_context *ctx, mapcache_cache *pcac
     content.data = (uint8_t*)tile->encoded_data->buf;
     content.data_len = tile->encoded_data->size;
 
+    if (cache->w > 0) {
+        /* Override bucket defaults */
+        properties.w = cache->w;
+        properties.w_use = 1;
+        /* Set dw to w, as dw is not demoted to w by default */
+        properties.dw = cache->w;
+        properties.dw_use = 1;
+    }
+
     // If we get an error it is advised that we call reconnect.  It also appears
     // that every now and then we get an error and need to retry once again to
     // get it to work.
     do
     {
-        error = riack_put(client, object, 0, &properties);
+        error = riack_put_ext(client, &object, pbucket_type, 0, &properties, 0);
         if (error != RIACK_SUCCESS) {
-            ctx->log(ctx, MAPCACHE_WARN, "Retry %d in riak_set for tile %s from cache %s due to eror %d", (4 - retries), key, cache->cache.name, error);
-            for (connect_error = riack_reconnect(client);
-                 connect_error != RIACK_SUCCESS && retries > 0;
-                 connect_error = riack_reconnect(client))
+            ctx->log(ctx, MAPCACHE_WARN, "Retry %d in riak_set for tile %s from cache %s due to error %d", (4 - retries), key, cache->cache.name, error);
+            for (connect_error = mapcache_riak_reconnect(ctx, cache, client);
+                 connect_error != MAPCACHE_SUCCESS && retries > 0;
+                 connect_error = mapcache_riak_reconnect(ctx, cache, client))
             {
                 --retries;
             }
@@ -470,10 +573,10 @@ static void _mapcache_cache_riak_set(mapcache_context *ctx, mapcache_cache *pcac
     }
     while (error != RIACK_SUCCESS && retries >= 0);
 
-    if (connect_error != RIACK_SUCCESS)
-      mapcache_connection_pool_invalidate_connection(ctx,pc);
+    if (connect_error != MAPCACHE_SUCCESS)
+        mapcache_connection_pool_invalidate_connection(ctx,pc);
     else
-      mapcache_connection_pool_release_connection(ctx,pc);
+        mapcache_connection_pool_release_connection(ctx,pc);
 
     if (error != RIACK_SUCCESS)
     {
@@ -485,7 +588,7 @@ static void _mapcache_cache_riak_set(mapcache_context *ctx, mapcache_cache *pcac
  * \private \memberof mapcache_cache_riak
  */
 static void _mapcache_cache_riak_configuration_parse_xml(mapcache_context *ctx, ezxml_t node, mapcache_cache *cache, mapcache_cfg *config) {
-    ezxml_t cur_node,xhost,xport,xbucket,xkey,xkeep_alive,xdetect_blank;
+    ezxml_t cur_node,xhost,xport,xbucket,xkey,xbucket_type,xuser,xpassword,xca_file,xkey_file,xcert_file,xkeep_alive,xsession_timeout,xciphers,xdetect_blank;
     mapcache_cache_riak *dcache = (mapcache_cache_riak*)cache;
     int servercount = 0;
 
@@ -508,7 +611,15 @@ static void _mapcache_cache_riak_configuration_parse_xml(mapcache_context *ctx, 
     xport = ezxml_child(cur_node, "port");
     xbucket = ezxml_child(cur_node, "bucket");
     xkey = ezxml_child(cur_node, "key");
+    xbucket_type = ezxml_child(cur_node, "bucket_type");
+    xuser = ezxml_child(cur_node, "user");
+    xpassword = ezxml_child(cur_node, "password");
+    xca_file = ezxml_child(cur_node, "ca_file");
+    xcert_file = ezxml_child(cur_node, "cert_file");
+    xkey_file = ezxml_child(cur_node, "key_file");
     xkeep_alive = ezxml_child(cur_node, "keep_alive");
+    xsession_timeout = ezxml_child(cur_node, "session_timeout");
+    xciphers = ezxml_child(cur_node, "ciphers");
     xdetect_blank = ezxml_child(node, "detect_blank");
 
     if (!xhost || !xhost->txt || ! *xhost->txt) {
@@ -551,7 +662,46 @@ static void _mapcache_cache_riak_configuration_parse_xml(mapcache_context *ctx, 
     }
 
     if(xkey && xkey->txt && *xkey->txt) {
-      dcache->key_template = apr_pstrdup(ctx->pool, xkey->txt);
+        dcache->key_template = apr_pstrdup(ctx->pool, xkey->txt);
+    }
+
+    if (xbucket_type && xbucket_type->txt && *xbucket_type->txt) {
+        dcache->bucket_type_template = apr_pstrdup(ctx->pool, xbucket_type->txt);
+    }
+
+    if (xuser && xuser->txt && *xuser->txt) {
+        dcache->user = apr_palloc(ctx->pool, sizeof(riack_string));
+        dcache->user->value = apr_pstrdup(ctx->pool, xuser->txt);
+        dcache->user->len = strlen(dcache->user->value);
+    }
+
+    if (xpassword && xpassword->txt && *xpassword->txt) {
+        dcache->password = apr_palloc(ctx->pool, sizeof(riack_string));
+        dcache->password->value = apr_pstrdup(ctx->pool, xpassword->txt);
+        dcache->password->len = strlen(dcache->password->value);
+    }
+
+    if (xca_file && xca_file->txt && *xca_file->txt) {
+        dcache->ca_file = apr_pstrdup(ctx->pool, xca_file->txt);
+    }
+
+    if (xcert_file && xcert_file->txt && *xcert_file->txt) {
+        dcache->cert_file = apr_pstrdup(ctx->pool, xcert_file->txt);
+    }
+
+    if (xkey_file && xkey_file->txt && *xkey_file->txt) {
+        dcache->key_file = apr_pstrdup(ctx->pool, xkey_file->txt);
+    }
+
+    if (xciphers && xciphers->txt && *xciphers->txt) {
+        dcache->ciphers = apr_pstrdup(ctx->pool, xciphers->txt);
+    }
+
+    if (xsession_timeout && xsession_timeout->txt && *xsession_timeout->txt) {
+        dcache->session_timeout = atoi(xsession_timeout->txt);
+        if (dcache->session_timeout <= 0) {
+            ctx->set_error(ctx, 400, "cache %s: session_timeout must be a positive number", cache->name);
+        }
     }
 
     if (xkeep_alive) {
@@ -594,18 +744,27 @@ mapcache_cache* mapcache_cache_riak_create(mapcache_context *ctx) {
     cache->port = 8087;	// Default RIAK port used for protobuf
     cache->bucket_template = NULL;
     cache->key_template = NULL;
+    cache->bucket_type_template = NULL;
     cache->keep_alive = 0;
     cache->r = 0; // 0 == use bucket default
     cache->w = 0; // 0 == use bucket default
     cache->detect_blank = 0;
+    // Security settings for Riak 2+
+    cache->user = NULL;
+    cache->password = NULL;
+    cache->ca_file = NULL;
+    cache->cert_file = NULL;
+    cache->key_file = NULL;
+    cache->ciphers = NULL;
+    cache->session_timeout = 0; // TLS session timeout in seconds, 0 == default.
 
     return (mapcache_cache*)cache;
 }
-
 #endif
-#else
+// Commented out because this function is already defined in cache_riak.c
+/*#else
 mapcache_cache* mapcache_cache_riak_create(mapcache_context *ctx) {
   ctx->set_error(ctx,400,"RIAK support not compiled in this version");
   return NULL;
-}
+}*/
 #endif
