@@ -1738,6 +1738,7 @@ typedef void (*mapcache_connection_constructor)(mapcache_context *ctx, void **co
 typedef void (*mapcache_connection_destructor)(void *connection);
 
 MS_DLL_EXPORT apr_status_t mapcache_connection_pool_create(mapcache_connection_pool **cp, apr_pool_t *server_pool);
+MS_DLL_EXPORT apr_status_t mapcache_connection_pool_create_custom(mapcache_connection_pool **cp, apr_pool_t *server_pool, int min, int smax, int hmax, int ttl);
 mapcache_pooled_connection* mapcache_connection_pool_get_connection(mapcache_context *ctx, char *key,
         mapcache_connection_constructor constructor,
         mapcache_connection_destructor destructor,
