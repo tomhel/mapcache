@@ -488,6 +488,43 @@ char* mapcache_util_quadkey_encode(mapcache_context *ctx, int x, int y, int z) {
   return key;
 }
 
+char *mapcache_util_quadkey64_encode(mapcache_context *ctx, int x, int y, int z)
+{
+   // converts a quadkey (base 4) to base 64. This results in a very compact string representation.
+   // all modulo operations are computed using shifts. This works because 4^3 = 64.
+   char *quadkey = mapcache_util_quadkey_encode(ctx, x, y, z);
+   int i = strlen(quadkey) + 1;
+   int size = (int) ceil(i / 3.0f);
+   // prefix quadkey with '1' so leading zeros are kept
+   char *qk = apr_pstrcat(ctx->pool, "1", quadkey, NULL);
+   char *result = apr_pcalloc(ctx->pool, size + 1);
+
+   // convert to base 64
+   do {
+      char r[] = "000"; //reminder
+      unsigned int j;
+      i-=3;
+      if (i >= 0) {
+         memcpy(r, &qk[i], 3);
+      } else {
+         memcpy(&r[-i], qk, 3+i);
+      }
+      j = strtoul(r, NULL, 4);
+      result[--size] = encoding_table[j];
+   } while (i > 0);
+
+   return result;
+}
+
+int mapcache_util_quadkey_zoom_start(mapcache_grid *grid) {
+   // calculate quadkey zoom start for grid.
+   // For example, if first level has 4 x 4 tiles, quadkey zoom start will be 2.
+   unsigned int maxx = grid->levels[0]->maxx;
+   unsigned int maxy = grid->levels[0]->maxy;
+   unsigned int max = maxx > maxy ? maxx : maxy;
+   return (int) ceil(log(max) / log(2));
+}
+
 char* mapcache_util_get_tile_key(mapcache_context *ctx, mapcache_tile *tile, char *template,
                                  char* sanitized_chars, char *sanitize_to)
 {
@@ -517,8 +554,15 @@ char* mapcache_util_get_tile_key(mapcache_context *ctx, mapcache_tile *tile, cha
                                        apr_psprintf(ctx->pool,"%d",
                                                     tile->grid_link->grid->nlevels - tile->z - 1));
     if(strstr(path,"{quadkey}")) {
-      char *quadkey = mapcache_util_quadkey_encode(ctx, tile->x, tile->y, tile->z);
+      int zoomstart = mapcache_util_quadkey_zoom_start(tile->grid_link->grid);
+      char *quadkey = mapcache_util_quadkey_encode(ctx, tile->x, tile->y, tile->z + zoomstart);
       path = mapcache_util_str_replace(ctx->pool,path, "{quadkey}", quadkey);
+    }
+
+    if(strstr(path,"{quadkey64}")) {
+      int zoomstart = mapcache_util_quadkey_zoom_start(tile->grid_link->grid);
+      char *quadkey = mapcache_util_quadkey64_encode(ctx, tile->x, tile->y, tile->z + zoomstart);
+      path = mapcache_util_str_replace(ctx->pool,path, "{quadkey64}", quadkey);
     }
 
     if(tile->dimensions) {
