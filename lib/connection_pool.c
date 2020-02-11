@@ -74,16 +74,20 @@ static apr_status_t mapcache_connection_container_destructor(void *conn_, void *
 }
 
 
-apr_status_t mapcache_connection_pool_create(mapcache_connection_pool **cp, apr_pool_t *server_pool) {
+apr_status_t mapcache_connection_pool_create_custom(mapcache_connection_pool **cp, apr_pool_t *server_pool, int min, int smax, int hmax, int ttl) {
   apr_status_t rv;
   *cp = apr_pcalloc(server_pool, sizeof(mapcache_connection_pool));
   (*cp)->server_pool = server_pool;
-  rv = apr_reslist_create(&((*cp)->connexions), 1, 5, 1024, 60*1000000,
+  rv = apr_reslist_create(&((*cp)->connexions), min, smax, hmax, ttl*1000000,
       mapcache_connection_container_creator,
       mapcache_connection_container_destructor,
       NULL,
       server_pool);
   return rv;
+}
+
+apr_status_t mapcache_connection_pool_create(mapcache_connection_pool **cp, apr_pool_t *server_pool) {
+  return mapcache_connection_pool_create_custom(cp, server_pool, 1, 5, 1024, 60);
 }
 
 mapcache_pooled_connection* mapcache_connection_pool_get_connection(mapcache_context *ctx, char *key,
