@@ -291,22 +291,23 @@ mapcache_http_response *mapcache_core_get_tile(mapcache_context *ctx, mapcache_r
     }
   }
 
+  if(req_tile->image_request.format) {
+    format = req_tile->image_request.format;
+  } else {
+    format = req_tile->tiles[0]->tileset->format;
+    if(!format) {
+      format = ctx->config->default_image_format; /* this one is always defined */
+    }
+  }
+
   if(!response->data) {
     /* we need to encode the raw image data */
     if(base) {
-      if(req_tile->image_request.format) {
-        format = req_tile->image_request.format;
-      } else {
-        format = req_tile->tiles[0]->tileset->format;
-        if(!format) {
-          format = ctx->config->default_image_format; /* this one is always defined */
-        }
-      }
       response->data = format->write(ctx, base, format);
       if(GC_HAS_ERROR(ctx)) {
         return NULL;
       }
-    } else {
+    } else if(!format || format->type != GC_RAW) {
       unsigned char empty[5] = {'#',0,0,0,0};
 #ifdef DEBUG
       if(!is_empty) {
@@ -317,20 +318,10 @@ mapcache_http_response *mapcache_core_get_tile(mapcache_context *ctx, mapcache_r
       response->data = mapcache_empty_png_decode(ctx,req_tile->tiles[0]->grid_link->grid->tile_sx, req_tile->tiles[0]->grid_link->grid->tile_sy, empty,&is_empty); /* is_empty is unchanged and left to 1 */
       format = mapcache_configuration_get_image_format(ctx->config,"PNG8");
     }
-  } else {
-    /* set format, not an image type (e.g. GC_RAW) */
-    if(req_tile->image_request.format) {
-      format = req_tile->image_request.format;
-    } else {
-      format = req_tile->tiles[0]->tileset->format;
-      if(!format) {
-        format = ctx->config->default_image_format; /* this one is always defined */
-      }
-    }
   }
 
   /* compute the content-type */
-  if(format && format->type == GC_RAW) {
+  if(format && format->type == GC_RAW && response->data) {
     apr_table_set(response->headers,"Content-Type",format->mime_type);
   } else {
     t = mapcache_imageio_header_sniff(ctx,response->data);
@@ -349,6 +340,10 @@ mapcache_http_response *mapcache_core_get_tile(mapcache_context *ctx, mapcache_r
     timestr = apr_palloc(ctx->pool, APR_RFC822_DATE_LEN);
     apr_rfc822_date(timestr, texpires);
     apr_table_setn(response->headers, "Expires", timestr);
+  }
+
+  if(!response->data) {
+    response->code = 204; /* No Content */
   }
 
   return response;
