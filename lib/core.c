@@ -322,6 +322,10 @@ mapcache_http_response *mapcache_core_get_tile(mapcache_context *ctx, mapcache_r
 
   /* compute the content-type */
   if(format && format->type == GC_RAW && response->data) {
+    char *content_encoding = ((mapcache_image_format_raw*)format)->content_encoding;
+    if(content_encoding) {
+      apr_table_set(response->headers,"Content-Encoding",content_encoding);
+    }
     apr_table_set(response->headers,"Content-Type",format->mime_type);
   } else {
     t = mapcache_imageio_header_sniff(ctx,response->data);

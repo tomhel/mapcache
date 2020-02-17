@@ -292,7 +292,12 @@ void mapcache_image_metatile_split(mapcache_context *ctx, mapcache_metatile *mt)
     ** No metatile support for raw format types...
     */
     if(mt->map.tileset->format->type == GC_RAW) {
-      mt->tiles[0].encoded_data = mt->map.encoded_data;
+      mapcache_compression_type compression_level = ((mapcache_image_format_raw*)mt->map.tileset->format)->compression_level;
+      if(compression_level == MAPCACHE_COMPRESSION_DISABLE) {
+        mt->tiles[0].encoded_data = mt->map.encoded_data;
+      } else {
+        mt->tiles[0].encoded_data = mapcache_gzip_compress(ctx, mt->map.encoded_data, compression_level);
+      }
       return;
     }
 

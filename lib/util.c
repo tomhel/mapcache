@@ -40,6 +40,10 @@
 #include <unistd.h>
 #endif
 
+#ifdef USE_ZLIB
+#include "zlib.h"
+#endif
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846264338327
 #endif
@@ -653,6 +657,57 @@ void mapcache_make_parent_dirs(mapcache_context *ctx, char *filename) {
   }
 } 
 
+#ifdef USE_ZLIB
+
+mapcache_buffer* mapcache_gzip_compress(mapcache_context *ctx, mapcache_buffer *buffer, mapcache_compression_type compression) {
+  int err, level = Z_DEFAULT_COMPRESSION;
+  mapcache_buffer *compressed_buffer;
+  z_stream stream;
+
+  if(compression == MAPCACHE_COMPRESSION_BEST) {
+    level = Z_BEST_COMPRESSION;
+  } else if(compression == MAPCACHE_COMPRESSION_FAST) {
+    level = Z_BEST_SPEED;
+  }
+
+  stream.zalloc = Z_NULL;
+  stream.zfree = Z_NULL;
+  stream.opaque = Z_NULL;
+
+  err = deflateInit2(&stream, level, Z_DEFLATED, MAX_WBITS + 16, MAX_MEM_LEVEL, Z_DEFAULT_STRATEGY);
+
+  if(err != Z_OK) {
+    ctx->set_error(ctx, 500, "zlib deflateInit2() error %d", err);
+    return NULL;
+  }
+
+  compressed_buffer = mapcache_buffer_create(deflateBound(&stream, buffer->size), ctx->pool);
+
+  stream.next_out = compressed_buffer->buf;
+  stream.avail_out = compressed_buffer->avail;
+  stream.next_in = buffer->buf;
+  stream.avail_in = buffer->size;
+
+  err = deflate(&stream, Z_FINISH);
+  compressed_buffer->size = stream.total_out;
+  deflateEnd(&stream);
+
+  if(err != Z_STREAM_END) {
+    ctx->set_error(ctx, 500, "zlib deflate() error %d", err);
+    return NULL;
+  }
+
+  return compressed_buffer;
+}
+
+#else
+
+mapcache_buffer* mapcache_gzip_compress(mapcache_context *ctx, mapcache_buffer *buffer, mapcache_compression_type compression) {
+  ctx->set_error(ctx, 500, "zlib is required for gzip compression support");
+  return NULL;
+}
+
+#endif
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
 

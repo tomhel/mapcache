@@ -1474,6 +1474,8 @@ typedef enum {
   MAPCACHE_COMPRESSION_DEFAULT /**< default compression*/
 } mapcache_compression_type;
 
+mapcache_buffer* mapcache_gzip_compress(mapcache_context *ctx, mapcache_buffer *buffer, mapcache_compression_type compression);
+
 /**
  * photometric interpretation for jpeg bands
  */
@@ -1539,9 +1541,11 @@ mapcache_image_format* mapcache_imageio_create_mixed_format(apr_pool_t *pool,
 
 struct mapcache_image_format_raw {
   mapcache_image_format format;
+  mapcache_compression_type compression_level; /* gzip compression level to apply */
+  char *content_encoding; /* the content encoding. Will be set to "gzip" if compression is applied */
 };
 
-mapcache_image_format* mapcache_imageio_create_raw_format(apr_pool_t *pool, char *name, char *extension, char *mime_type); 
+mapcache_image_format* mapcache_imageio_create_raw_format(mapcache_context *ctx, char *name, char *extension, char *mime_type, mapcache_compression_type compression);
 int mapcache_imageio_is_raw_tileset(mapcache_tileset *tileset);
 
 /**\class mapcache_image_format_png_q

@@ -625,9 +625,22 @@ void parseFormat(mapcache_context *ctx, ezxml_t node, mapcache_cfg *config)
   } else if(!strcasecmp(type,"RAW")) {
     char *extension=NULL;
     char *mime_type=NULL;
+    mapcache_compression_type compression = MAPCACHE_COMPRESSION_DISABLE;
     if ((cur_node = ezxml_child(node,"extension")) != NULL) extension = apr_pstrdup(ctx->pool, cur_node->txt);
     if ((cur_node = ezxml_child(node,"mime_type")) != NULL) mime_type = apr_pstrdup(ctx->pool, cur_node->txt);
-    format = mapcache_imageio_create_raw_format(ctx->pool,name,extension,mime_type);
+    if ((cur_node = ezxml_child(node,"compression")) != NULL) {
+      if(!strcmp(cur_node->txt, "fast")) {
+        compression = MAPCACHE_COMPRESSION_FAST;
+      } else if(!strcmp(cur_node->txt, "best")) {
+        compression = MAPCACHE_COMPRESSION_BEST;
+      } else if(!strcmp(cur_node->txt, "default")) {
+        compression = MAPCACHE_COMPRESSION_DEFAULT;
+      } else if(strcmp(cur_node->txt, "none")) {
+        ctx->set_error(ctx, 400, "unknown compression type %s for format \"%s\"", cur_node->txt, name);
+        return;
+      }
+    }
+    format = mapcache_imageio_create_raw_format(ctx,name,extension,mime_type,compression);
   } else {
     ctx->set_error(ctx, 400, "unknown format type %s for format \"%s\"", type, name);
     return;
