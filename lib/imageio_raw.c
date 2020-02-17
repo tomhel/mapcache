@@ -47,15 +47,27 @@ mapcache_buffer* _mapcache_imageio_raw_encode(mapcache_context *ctx, mapcache_im
   return NULL;
 }
 
-mapcache_image_format* mapcache_imageio_create_raw_format(apr_pool_t *pool, char *name, char *extension, char *mime_type)
+mapcache_image_format* mapcache_imageio_create_raw_format(mapcache_context *ctx, char *name, char *extension, char *mime_type, mapcache_compression_type compression)
 {
-  mapcache_image_format_raw *format = apr_pcalloc(pool, sizeof(mapcache_image_format_raw));
+  mapcache_image_format_raw *format = apr_pcalloc(ctx->pool, sizeof(mapcache_image_format_raw));
   format->format.name = name;
-  format->format.extension = apr_pstrdup(pool, extension);
-  format->format.mime_type = apr_pstrdup(pool, mime_type);
-  format->format.metadata = apr_table_make(pool,3);
+  format->format.extension = apr_pstrdup(ctx->pool, extension);
+  format->format.mime_type = apr_pstrdup(ctx->pool, mime_type);
+  format->compression_level = compression;
+  format->format.metadata = apr_table_make(ctx->pool,3);
   format->format.create_empty_image = _mapcache_imageio_raw_create_empty;
   format->format.write = _mapcache_imageio_raw_encode;
   format->format.type = GC_RAW;
+  format->content_encoding = NULL;
+  if(compression != MAPCACHE_COMPRESSION_DISABLE) {
+    format->content_encoding = apr_pstrdup(ctx->pool, "gzip");
+  }
+
+#ifndef USE_ZLIB
+  if(compression != MAPCACHE_COMPRESSION_DISABLE) {
+    ctx->set_error(ctx, 400, "compression for RAW format requires zlib support");
+    return NULL;
+  }
+#endif
   return (mapcache_image_format*)format;
 }
