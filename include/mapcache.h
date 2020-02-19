@@ -756,7 +756,7 @@ void mapcache_image_fill(mapcache_context *ctx, mapcache_image *image, const uns
 
 /** \defgroup http HTTP Request handling*/
 /** @{ */
-void mapcache_http_do_request(mapcache_context *ctx, mapcache_http *req, mapcache_buffer *data, apr_table_t *headers, long *http_code);
+void mapcache_http_do_request(mapcache_context *ctx, mapcache_http *req, mapcache_buffer *data, apr_table_t *headers, long *http_code, char **content_type);
 char* mapcache_http_build_url(mapcache_context *ctx, char *base, apr_table_t *params);
 MS_DLL_EXPORT apr_table_t *mapcache_http_parse_param_string(mapcache_context *ctx, char *args);
 /** @} */

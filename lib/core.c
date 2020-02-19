@@ -556,7 +556,7 @@ mapcache_http_response *mapcache_core_proxy_request(mapcache_context *ctx, mapca
   if(req_proxy->headers) {
     apr_table_overlap(http->headers, req_proxy->headers, APR_OVERLAP_TABLES_SET);
   }
-  mapcache_http_do_request(ctx,http, response->data,response->headers,&response->code);
+  mapcache_http_do_request(ctx,http, response->data,response->headers,&response->code,NULL);
   if(response->code !=0 && GC_HAS_ERROR(ctx)) {
     /* the http request was successful, but the server returned an error */
     ctx->clear_errors(ctx);

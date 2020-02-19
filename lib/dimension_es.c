@@ -157,7 +157,7 @@ static apr_array_header_t * _mapcache_dimension_elasticsearch_do_query(mapcache_
   mapcache_http * req = mapcache_http_clone(ctx,http);
   req->post_body = apr_pstrdup(ctx->pool,query);
   req->post_len = strlen(req->post_body);
-  mapcache_http_do_request(ctx,req,buffer,NULL,NULL);
+  mapcache_http_do_request(ctx,req,buffer,NULL,NULL,NULL);
   if (GC_HAS_ERROR(ctx)) {
     return table;
   }
