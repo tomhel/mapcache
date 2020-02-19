@@ -99,7 +99,7 @@ static void _header_replace_str(mapcache_context *ctx, apr_table_t *headers, cha
   *val = value;
 }
 
-void mapcache_http_do_request(mapcache_context *ctx, mapcache_http *req, mapcache_buffer *data, apr_table_t *headers, long *http_code)
+void mapcache_http_do_request(mapcache_context *ctx, mapcache_http *req, mapcache_buffer *data, apr_table_t *headers, long *http_code, char **content_type)
 {
   CURL *curl_handle;
   char error_msg[CURL_ERROR_SIZE];
@@ -165,6 +165,14 @@ void mapcache_http_do_request(mapcache_context *ctx, mapcache_http *req, mapcach
   if(http_code)
     curl_easy_getinfo (curl_handle, CURLINFO_RESPONSE_CODE, http_code);
 
+  if(content_type) {
+    char *ct = NULL;
+    curl_easy_getinfo(curl_handle, CURLINFO_CONTENT_TYPE, &ct);
+    if(ct) {
+      *content_type = apr_pstrdup(ctx->pool, ct);
+    }
+  }
+
   if(ret != CURLE_OK) {
     ctx->set_error(ctx, 502, "curl failed to request url %s : %s", req->url, error_msg);
   }
@@ -173,11 +181,11 @@ void mapcache_http_do_request(mapcache_context *ctx, mapcache_http *req, mapcach
 }
 
 void mapcache_http_do_request_with_params(mapcache_context *ctx, mapcache_http *req, apr_table_t *params,
-    mapcache_buffer *data, apr_table_t *headers, long *http_code)
+    mapcache_buffer *data, apr_table_t *headers, long *http_code, char **content_type)
 {
   mapcache_http *request = mapcache_http_clone(ctx,req);
   request->url = mapcache_http_build_url(ctx,req->url,params);
-  mapcache_http_do_request(ctx,request,data,headers, http_code);
+  mapcache_http_do_request(ctx,request,data,headers, http_code, content_type);
 }
 
 typedef struct header_cb_struct{

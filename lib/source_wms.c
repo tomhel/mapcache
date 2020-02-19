@@ -32,6 +32,7 @@
 #include "ezxml.h"
 #include <apr_tables.h>
 #include <apr_strings.h>
+#include <string.h>
 
 typedef struct mapcache_source_wms mapcache_source_wms;
 
@@ -45,6 +46,7 @@ struct mapcache_source_wms {
   apr_table_t *getmap_params; /**< WMS parameters specified in configuration */
   apr_table_t *getfeatureinfo_params; /**< WMS parameters specified in configuration */
   mapcache_http *http;
+  char *getmap_response_content_type;
 };
 
 /**
@@ -53,6 +55,8 @@ struct mapcache_source_wms {
  */
 void _mapcache_source_wms_render_map(mapcache_context *ctx, mapcache_source *psource, mapcache_map *map)
 {
+  char *content_type = NULL;
+  int valid_content_type = MAPCACHE_TRUE;
   mapcache_source_wms *wms = (mapcache_source_wms*)psource;
   mapcache_http *http;
   apr_table_t *params = apr_table_clone(ctx->pool,wms->wms_default_params);
@@ -90,10 +94,16 @@ void _mapcache_source_wms_render_map(mapcache_context *ctx, mapcache_source *pso
   map->encoded_data = mapcache_buffer_create(30000,ctx->pool);
   http = mapcache_http_clone(ctx, wms->http);
   http->url = mapcache_http_build_url(ctx,http->url,params);
-  mapcache_http_do_request(ctx,http,map->encoded_data,NULL,NULL);
+  mapcache_http_do_request(ctx,http,map->encoded_data,NULL,NULL,&content_type);
   GC_CHECK_ERROR(ctx);
 
-  if(!mapcache_imageio_is_raw_tileset(map->tileset) && !mapcache_imageio_is_valid_format(ctx,map->encoded_data)) {
+  if(wms->getmap_response_content_type != NULL) {
+    if(content_type == NULL || strncmp(wms->getmap_response_content_type,content_type,strlen(wms->getmap_response_content_type))) {
+      valid_content_type = MAPCACHE_FALSE;
+    }
+  }
+
+  if(!valid_content_type || (!mapcache_imageio_is_raw_tileset(map->tileset) && !mapcache_imageio_is_valid_format(ctx,map->encoded_data))) {
     char *returned_data = apr_pstrndup(ctx->pool,(char*)map->encoded_data->buf,map->encoded_data->size);
     ctx->set_error(ctx, 502, "wms request for tileset %s returned an unsupported format:\n%s",
                    map->tileset->name, returned_data);
@@ -136,7 +146,7 @@ void _mapcache_source_wms_query(mapcache_context *ctx, mapcache_source *source, 
   fi->data = mapcache_buffer_create(30000,ctx->pool);
   http = mapcache_http_clone(ctx, wms->http);
   http->url = mapcache_http_build_url(ctx,http->url,params);
-  mapcache_http_do_request(ctx,http,fi->data,NULL,NULL);
+  mapcache_http_do_request(ctx,http,fi->data,NULL,NULL,NULL);
   GC_CHECK_ERROR(ctx);
 
 }
@@ -160,6 +170,9 @@ void _mapcache_source_wms_configuration_parse_xml(mapcache_context *ctx, ezxml_t
     } else {
       ctx->set_error(ctx,400,"wms source %s <getmap> has no <params> block (should contain at least <LAYERS> child)",source->name);
       return;
+    }
+    if((gm_node = ezxml_child(cur_node,"response_content_type")) != NULL) {
+      src->getmap_response_content_type = apr_pstrdup(ctx->pool,gm_node->txt);
     }
   } else {
     ctx->set_error(ctx,400,"wms source %s has no <getmap> block",source->name);
@@ -235,6 +248,7 @@ mapcache_source* mapcache_source_wms_create(mapcache_context *ctx)
   source->wms_default_params = apr_table_make(ctx->pool,4);;
   source->getmap_params = apr_table_make(ctx->pool,4);
   source->getfeatureinfo_params = apr_table_make(ctx->pool,4);
+  source->getmap_response_content_type = NULL;
   apr_table_add(source->wms_default_params,"VERSION","1.1.1");
   apr_table_add(source->wms_default_params,"REQUEST","GetMap");
   apr_table_add(source->wms_default_params,"SERVICE","WMS");
