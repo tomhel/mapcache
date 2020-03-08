@@ -27,12 +27,14 @@
  *****************************************************************************/
 
 #include "mapcache.h"
+#include <string.h>
 
 typedef struct mapcache_cache_multitier mapcache_cache_multitier;
 
 struct mapcache_cache_multitier {
   mapcache_cache cache;
   apr_array_header_t *caches;
+  int write_cache_idx;
 };
 
 
@@ -99,14 +101,14 @@ static int _mapcache_cache_multitier_tile_get(mapcache_context *ctx, mapcache_ca
 static void _mapcache_cache_multitier_tile_set(mapcache_context *ctx, mapcache_cache *pcache, mapcache_tile *tile)
 {
   mapcache_cache_multitier *cache = (mapcache_cache_multitier*)pcache;
-  mapcache_cache *subcache = APR_ARRAY_IDX(cache->caches,cache->caches->nelts-1,mapcache_cache*);
+  mapcache_cache *subcache = APR_ARRAY_IDX(cache->caches,cache->write_cache_idx,mapcache_cache*);
   return mapcache_cache_tile_set(ctx, subcache, tile);
 }
 
 static void _mapcache_cache_multitier_tile_multi_set(mapcache_context *ctx, mapcache_cache *pcache, mapcache_tile *tiles, int ntiles)
 {
   mapcache_cache_multitier *cache = (mapcache_cache_multitier*)pcache;
-  mapcache_cache *subcache = APR_ARRAY_IDX(cache->caches,cache->caches->nelts-1,mapcache_cache*);
+  mapcache_cache *subcache = APR_ARRAY_IDX(cache->caches,cache->write_cache_idx,mapcache_cache*);
   return mapcache_cache_tile_multi_set(ctx, subcache, tiles, ntiles);
 }
 
@@ -115,10 +117,27 @@ static void _mapcache_cache_multitier_tile_multi_set(mapcache_context *ctx, mapc
  */
 static void _mapcache_cache_multitier_configuration_parse_xml(mapcache_context *ctx, ezxml_t node, mapcache_cache *pcache, mapcache_cfg *config)
 {
+  int i,rw_cache=-1;
   ezxml_t cur_node;
   mapcache_cache_multitier *cache = (mapcache_cache_multitier*)pcache;
   cache->caches = apr_array_make(ctx->pool,3,sizeof(mapcache_cache*));
-  for(cur_node = ezxml_child(node,"cache"); cur_node; cur_node = cur_node->next) {
+  for(i=0,cur_node = ezxml_child(node,"cache"); cur_node; cur_node = cur_node->next,i++) {
+    char *write;
+    if((write = ezxml_attr(cur_node,"write")) != NULL) {
+      /* check if write flag is set to true on this child cache */
+      if(!strcmp(write,"true")) {
+        if(cache->write_cache_idx >= 0) {
+          /* can only set write flag to true on one child cache */
+          ctx->set_error(ctx,400,"multitier cache \"%s\" has write attribute set to true on more than one child cache", pcache->name);
+          return;
+        }
+        cache->write_cache_idx = i;
+      }
+    } else {
+      /* write flag not set, this child cache is writable by default. we'll remember the last one */
+      rw_cache = i;
+    }
+
     mapcache_cache *refcache = mapcache_configuration_get_cache(config, cur_node->txt);
     if(!refcache) {
       ctx->set_error(ctx, 400, "multitier cache \"%s\" references cache \"%s\","
@@ -129,6 +148,17 @@ static void _mapcache_cache_multitier_configuration_parse_xml(mapcache_context *
   }
   if(cache->caches->nelts == 0) {
     ctx->set_error(ctx,400,"multitier cache \"%s\" does not reference any child caches", pcache->name);
+    return;
+  }
+
+  if(cache->write_cache_idx < 0) {
+    /* write flag was not set to true on any child cache */
+    if(rw_cache < 0) {
+      ctx->set_error(ctx,400,"multitier cache \"%s\" has no child cache configured as writable", pcache->name);
+      return;
+    }
+    /* write tiles to last writable child cache */
+    cache->write_cache_idx = rw_cache;
   }
 }
 
@@ -151,6 +181,7 @@ mapcache_cache* mapcache_cache_multitier_create(mapcache_context *ctx)
     ctx->set_error(ctx, 500, "failed to allocate multitier cache");
     return NULL;
   }
+  cache->write_cache_idx = -1;
   cache->cache.metadata = apr_table_make(ctx->pool,3);
   cache->cache.type = MAPCACHE_CACHE_COMPOSITE;
   cache->cache._tile_delete = _mapcache_cache_multitier_tile_delete;
