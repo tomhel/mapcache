@@ -273,7 +273,17 @@ static void _mapcache_cache_memcache_set(mapcache_context *ctx, mapcache_cache *
   /* concatenate the current time to the end of the memcache data so we can extract it out
    * when we re-get the tile */
   data = calloc(1,encoded_data->size+sizeof(apr_time_t));
-  now = apr_time_now();
+  if(tile->mtime) {
+    /* mtime might already be set on the tile if it comes from a composite cache. 
+     * we should recalculate the expiration time based on that or the tile will live longer than intended */
+    if(expires) {
+      /* if expires is set, we must make sure not to set it to zero or the tile will live forever */
+      expires = MAPCACHE_MAX(1, expires - apr_time_sec(apr_time_now() - tile->mtime));
+    }
+    now = tile->mtime;
+  } else {
+    now = apr_time_now();
+  }
   apr_pool_cleanup_register(ctx->pool, data, (void*)free, apr_pool_cleanup_null);
   memcpy(data,encoded_data->buf,encoded_data->size);
   memcpy(&(data[encoded_data->size]),&now,sizeof(apr_time_t));
