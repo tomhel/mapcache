@@ -244,6 +244,7 @@ typedef struct {
   mapcache_locker locker;
   int nservers;
   mapcache_locker_memcache_server *servers;
+  char *key_prefix;
 } mapcache_locker_memcache;
 
 void mapcache_locker_memcache_parse_xml(mapcache_context *ctx, mapcache_locker *self, ezxml_t doc) {
@@ -276,6 +277,9 @@ void mapcache_locker_memcache_parse_xml(mapcache_context *ctx, mapcache_locker *
     }
     lm->nservers++;
   }
+  if((node = ezxml_child(doc,"key_prefix")) != NULL) {
+    lm->key_prefix = apr_pstrdup(ctx->pool, node->txt);
+  }
 }
 
 static char* memcache_key_for_resource(mapcache_context *ctx, mapcache_locker_memcache *lm, const char *resource)
@@ -289,7 +293,7 @@ static char* memcache_key_for_resource(mapcache_context *ctx, mapcache_locker_me
     }
     safeptr++;
   }
-  return apr_psprintf(ctx->pool,MAPCACHE_LOCKFILE_PREFIX"%s.lck",saferes);
+  return apr_psprintf(ctx->pool,"%s"MAPCACHE_LOCKFILE_PREFIX"%s.lck",lm->key_prefix?lm->key_prefix:"",saferes);
 }
 
 apr_memcache_t* create_memcache(mapcache_context *ctx, mapcache_locker_memcache *lm) {
@@ -387,6 +391,7 @@ mapcache_locker* mapcache_locker_memcache_create(mapcache_context *ctx) {
   l->release_lock = mapcache_locker_memcache_release_lock;
   lm->nservers = 0;
   lm->servers = NULL;
+  lm->key_prefix = NULL;
   return l;
 }
 
