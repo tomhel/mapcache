@@ -48,6 +48,7 @@ struct mapcache_cache_memcache {
   int nservers;
   struct mapcache_cache_memcache_server *servers;
   int detect_blank;
+  char* key_prefix;
 };
 
 struct mapcache_memcache_conn_param {
@@ -124,6 +125,8 @@ static int _mapcache_cache_memcache_has_tile(mapcache_context *ctx, mapcache_cac
     rv = MAPCACHE_FALSE;
     goto cleanup;
   }
+  if(cache->key_prefix)
+    key = apr_pstrcat(ctx->pool, cache->key_prefix, key, NULL);
   rv = apr_memcache_getp(mpc->memcache,ctx->pool,key,&tmpdata,&tmpdatasize,NULL);
   if(rv != APR_SUCCESS) {
     rv = MAPCACHE_FALSE;
@@ -152,6 +155,8 @@ static void _mapcache_cache_memcache_delete(mapcache_context *ctx, mapcache_cach
   mpc = pc->connection;
   key = mapcache_util_get_tile_key(ctx, tile,NULL," \r\n\t\f\e\a\b","#");
   if(GC_HAS_ERROR(ctx)) goto cleanup;
+  if(cache->key_prefix)
+    key = apr_pstrcat(ctx->pool, cache->key_prefix, key, NULL);
   
   rv = apr_memcache_delete(mpc->memcache,key,0);
   if(rv != APR_SUCCESS && rv!= APR_NOTFOUND) {
@@ -188,6 +193,8 @@ static int _mapcache_cache_memcache_get(mapcache_context *ctx, mapcache_cache *p
     rv = MAPCACHE_FAILURE;
     goto cleanup;
   }
+  if(cache->key_prefix)
+    key = apr_pstrcat(ctx->pool, cache->key_prefix, key, NULL);
   encoded_data = mapcache_buffer_create(0,ctx->pool);
   rv = apr_memcache_getp(mpc->memcache,ctx->pool,key,(char**)&encoded_data->buf,&encoded_data->size,NULL);
   if(rv != APR_SUCCESS) {
@@ -247,6 +254,9 @@ static void _mapcache_cache_memcache_set(mapcache_context *ctx, mapcache_cache *
   key = mapcache_util_get_tile_key(ctx, tile,NULL," \r\n\t\f\e\a\b","#");
   if(GC_HAS_ERROR(ctx)) goto cleanup;
   
+  if(cache->key_prefix)
+    key = apr_pstrcat(ctx->pool, cache->key_prefix, key, NULL);
+
   if(tile->tileset->auto_expire)
     expires = tile->tileset->auto_expire;
 
@@ -337,6 +347,10 @@ static void _mapcache_cache_memcache_configuration_parse_xml(mapcache_context *c
       dcache->detect_blank = 1;
     }
   }
+
+  if ((cur_node = ezxml_child(node, "key_prefix")) != NULL) {
+    dcache->key_prefix = apr_pstrdup(ctx->pool,cur_node->txt);
+  }
 }
 
 /**
@@ -362,6 +376,7 @@ mapcache_cache* mapcache_cache_memcache_create(mapcache_context *ctx)
     ctx->set_error(ctx, 500, "failed to allocate memcache cache");
     return NULL;
   }
+  cache->key_prefix = NULL;
   cache->cache.metadata = apr_table_make(ctx->pool,3);
   cache->cache.type = MAPCACHE_CACHE_MEMCACHE;
   cache->cache._tile_get = _mapcache_cache_memcache_get;
