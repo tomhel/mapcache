@@ -65,7 +65,7 @@ void mapcache_memcache_connection_constructor(mapcache_context *ctx, void **conn
   struct mapcache_memcache_pooled_connection *pc;
   int i;
   pc = calloc(1,sizeof(struct mapcache_memcache_pooled_connection));
-  apr_pool_create(&pc->pool,NULL);
+  apr_pool_create_unmanaged(&pc->pool);
   if(APR_SUCCESS != apr_memcache_create(pc->pool, cache->nservers, 0, &(pc->memcache))) {
     ctx->set_error(ctx,500,"cache %s: failed to create memcache backend", cache->cache.name);
     return;
