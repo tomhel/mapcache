@@ -105,6 +105,13 @@ static void _mapcache_memcache_release_conn(mapcache_context *ctx, mapcache_pool
   mapcache_connection_pool_release_connection(ctx, con);
 }
 
+static void _mapcache_memcache_reconnect(mapcache_context *ctx, mapcache_cache *pcache, mapcache_pooled_connection *pc) {
+  struct mapcache_memcache_conn_param param;
+  param.cache = (mapcache_cache_memcache*)pcache;
+  mapcache_memcache_connection_destructor(pc->connection);
+  mapcache_memcache_connection_constructor(ctx, &pc->connection, &param);
+}
+
 static int _mapcache_cache_memcache_has_tile(mapcache_context *ctx, mapcache_cache *pcache, mapcache_tile *tile)
 {
   char *key;
@@ -125,6 +132,15 @@ static int _mapcache_cache_memcache_has_tile(mapcache_context *ctx, mapcache_cac
     goto cleanup;
   }
   rv = apr_memcache_getp(mpc->memcache,ctx->pool,key,&tmpdata,&tmpdatasize,NULL);
+  if(rv != APR_SUCCESS && rv != APR_NOTFOUND) {
+    _mapcache_memcache_reconnect(ctx, pcache, pc);
+    if(GC_HAS_ERROR(ctx)) {
+      rv = MAPCACHE_FALSE;
+      goto cleanup;
+    }
+    mpc = pc->connection;
+    rv = apr_memcache_getp(mpc->memcache,ctx->pool,key,&tmpdata,&tmpdatasize,NULL);
+  }
   if(rv != APR_SUCCESS) {
     rv = MAPCACHE_FALSE;
     goto cleanup;
@@ -154,6 +170,14 @@ static void _mapcache_cache_memcache_delete(mapcache_context *ctx, mapcache_cach
   if(GC_HAS_ERROR(ctx)) goto cleanup;
   
   rv = apr_memcache_delete(mpc->memcache,key,0);
+  if(rv != APR_SUCCESS && rv != APR_NOTFOUND) {
+    _mapcache_memcache_reconnect(ctx, pcache, pc);
+    if(GC_HAS_ERROR(ctx)) {
+      goto cleanup;
+    }
+    mpc = pc->connection;
+    rv = apr_memcache_delete(mpc->memcache,key,0);
+  }
   if(rv != APR_SUCCESS && rv!= APR_NOTFOUND) {
     ctx->set_error(ctx,500,"memcache: failed to delete key %s: %s", key, apr_strerror(rv,errmsg,120));
     goto cleanup;
@@ -190,6 +214,15 @@ static int _mapcache_cache_memcache_get(mapcache_context *ctx, mapcache_cache *p
   }
   encoded_data = mapcache_buffer_create(0,ctx->pool);
   rv = apr_memcache_getp(mpc->memcache,ctx->pool,key,(char**)&encoded_data->buf,&encoded_data->size,NULL);
+  if(rv != APR_SUCCESS && rv != APR_NOTFOUND) {
+    _mapcache_memcache_reconnect(ctx, pcache, pc);
+    if(GC_HAS_ERROR(ctx)) {
+      rv = MAPCACHE_FAILURE;
+      goto cleanup;
+    }
+    mpc = pc->connection;
+    rv = apr_memcache_getp(mpc->memcache,ctx->pool,key,(char**)&encoded_data->buf,&encoded_data->size,NULL);
+  }
   if(rv != APR_SUCCESS) {
     rv = MAPCACHE_CACHE_MISS;
     goto cleanup;
@@ -279,6 +312,14 @@ static void _mapcache_cache_memcache_set(mapcache_context *ctx, mapcache_cache *
   memcpy(&(data[encoded_data->size]),&now,sizeof(apr_time_t));
 
   rv = apr_memcache_set(mpc->memcache,key,data,encoded_data->size+sizeof(apr_time_t),expires,0);
+  if(rv != APR_SUCCESS) {
+    _mapcache_memcache_reconnect(ctx, pcache, pc);
+    if(GC_HAS_ERROR(ctx)) {
+      goto cleanup;
+    }
+    mpc = pc->connection;
+    rv = apr_memcache_set(mpc->memcache,key,data,encoded_data->size+sizeof(apr_time_t),expires,0);
+  }
   if(rv != APR_SUCCESS) {
     ctx->set_error(ctx,500,"failed to store tile %d %d %d to memcache cache %s",
                    tile->x,tile->y,tile->z,cache->cache.name);
