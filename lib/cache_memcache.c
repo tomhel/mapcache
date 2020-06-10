@@ -73,7 +73,7 @@ void mapcache_memcache_connection_constructor(mapcache_context *ctx, void **conn
   }
   for(i=0; i<param->cache->nservers; i++) {
     apr_memcache_server_t *server;
-    if(APR_SUCCESS != apr_memcache_server_create(pc->pool,cache->servers[i].host,cache->servers[i].port,4,5,50,10000,&server)) {
+    if(APR_SUCCESS != apr_memcache_server_create(pc->pool,cache->servers[i].host,cache->servers[i].port,1,1,1,apr_time_from_sec(50),&server)) {
       ctx->set_error(ctx,500,"cache %s: failed to create server %s:%d",cache->cache.name,cache->servers[i].host,cache->servers[i].port);
       return;
     }
