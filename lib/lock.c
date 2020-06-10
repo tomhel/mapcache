@@ -302,6 +302,13 @@ static void _mapcache_memcache_release_conn(mapcache_context *ctx, mapcache_pool
   mapcache_connection_pool_release_connection(ctx, con);
 }
 
+static void _mapcache_memcache_reconnect(mapcache_context *ctx, mapcache_locker_memcache *locker, mapcache_pooled_connection *pc) {
+  struct mapcache_memcache_conn_param param;
+  param.locker = (mapcache_locker_memcache*)locker;
+  mapcache_locker_memcache_connection_destructor(pc->connection);
+  mapcache_locker_memcache_connection_constructor(ctx, &pc->connection, &param);
+}
+
 void mapcache_locker_memcache_parse_xml(mapcache_context *ctx, mapcache_locker *self, ezxml_t doc) {
   mapcache_locker_memcache *lm = (mapcache_locker_memcache*)self;
   ezxml_t node,server_node;
@@ -371,6 +378,15 @@ mapcache_lock_result mapcache_locker_memcache_ping_lock(mapcache_context *ctx, m
   }
   mpc = pc->connection;
   rv = apr_memcache_getp(mpc->memcache,ctx->pool,mlock->lockname,&one,&ione,NULL);
+  if(rv != APR_SUCCESS && rv != APR_NOTFOUND) {
+    _mapcache_memcache_reconnect(ctx, (mapcache_locker_memcache*)self, pc);
+    if(GC_HAS_ERROR(ctx)) {
+      _mapcache_memcache_release_conn(ctx,pc);
+      return MAPCACHE_LOCK_NOENT;
+    }
+    mpc = pc->connection;
+    rv = apr_memcache_getp(mpc->memcache,ctx->pool,mlock->lockname,&one,&ione,NULL);
+  }
   _mapcache_memcache_release_conn(ctx,pc);
   if(rv == APR_SUCCESS)
     return MAPCACHE_LOCK_LOCKED;
@@ -397,6 +413,15 @@ mapcache_lock_result mapcache_locker_memcache_aquire_lock(mapcache_context *ctx,
   mpc = pc->connection;
   *lock = mlock;
   rv = apr_memcache_add(mpc->memcache,mlock->lockname,"1",1,self->timeout,0);
+  if(rv != APR_SUCCESS && rv != APR_EEXIST) {
+    _mapcache_memcache_reconnect(ctx, lm, pc);
+    if(GC_HAS_ERROR(ctx)) {
+      _mapcache_memcache_release_conn(ctx,pc);
+      return MAPCACHE_LOCK_NOENT;
+    }
+    mpc = pc->connection;
+    rv = apr_memcache_add(mpc->memcache,mlock->lockname,"1",1,self->timeout,0);
+  }
   _mapcache_memcache_release_conn(ctx,pc);
   if( rv == APR_SUCCESS) {
     return MAPCACHE_LOCK_AQUIRED;
@@ -424,6 +449,15 @@ void mapcache_locker_memcache_release_lock(mapcache_context *ctx, mapcache_locke
     return;
   mpc = pc->connection;
   rv = apr_memcache_delete(mpc->memcache,mlock->lockname,0);
+  if(rv != APR_SUCCESS && rv != APR_NOTFOUND) {
+    _mapcache_memcache_reconnect(ctx, (mapcache_locker_memcache*)self, pc);
+    if(GC_HAS_ERROR(ctx)) {
+      _mapcache_memcache_release_conn(ctx,pc);
+      return;
+    }
+    mpc = pc->connection;
+    rv = apr_memcache_delete(mpc->memcache,mlock->lockname,0);
+  }
   _mapcache_memcache_release_conn(ctx,pc);
   if(rv != APR_SUCCESS && rv!= APR_NOTFOUND) {
     ctx->set_error(ctx,500,"memcache: failed to delete key %s: %s", mlock->lockname, apr_strerror(rv,errmsg,120));
