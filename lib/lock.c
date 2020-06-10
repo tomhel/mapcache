@@ -247,6 +247,61 @@ typedef struct {
   char *key_prefix;
 } mapcache_locker_memcache;
 
+struct mapcache_memcache_conn_param {
+  mapcache_locker_memcache *locker;
+};
+
+struct mapcache_memcache_pooled_connection {
+  apr_memcache_t *memcache;
+  apr_pool_t *pool;
+};
+
+void mapcache_locker_memcache_connection_constructor(mapcache_context *ctx, void **conn_, void *params) {
+  struct mapcache_memcache_conn_param *param = params;
+  mapcache_locker_memcache *locker = param->locker;
+  struct mapcache_memcache_pooled_connection *pc;
+  int i;
+  pc = calloc(1,sizeof(struct mapcache_memcache_pooled_connection));
+  apr_pool_create(&pc->pool,NULL);
+  if(APR_SUCCESS != apr_memcache_create(pc->pool, locker->nservers, 0, &(pc->memcache))) {
+    ctx->set_error(ctx,500,"memcache locker: failed to create memcache locker");
+    return;
+  }
+  for(i=0; i<param->locker->nservers; i++) {
+    apr_memcache_server_t *server;
+    if(APR_SUCCESS != apr_memcache_server_create(pc->pool,locker->servers[i].host,locker->servers[i].port,1,1,1,apr_time_from_sec(50),&server)) {
+      ctx->set_error(ctx,500,"memcache locker: failed to create server %s:%d",locker->servers[i].host,locker->servers[i].port);
+      return;
+    }
+    if(APR_SUCCESS != apr_memcache_add_server(pc->memcache,server)) {
+      ctx->set_error(ctx,500,"memcache locker: failed to add server %s:%d",locker->servers[i].host,locker->servers[i].port);
+      return;
+    }
+  }
+  *conn_ = pc;
+}
+
+void mapcache_locker_memcache_connection_destructor(void *conn_) {
+  struct mapcache_memcache_pooled_connection *pc = conn_;
+  apr_pool_destroy(pc->pool);
+  free(pc);
+}
+
+static mapcache_pooled_connection* _mapcache_memcache_get_conn(mapcache_context *ctx,
+        mapcache_locker_memcache *locker) {
+  mapcache_pooled_connection *pc;
+  struct mapcache_memcache_conn_param param;
+
+  param.locker = locker;
+
+  pc = mapcache_connection_pool_get_connection(ctx,"__locker_memcache__", mapcache_locker_memcache_connection_constructor, mapcache_locker_memcache_connection_destructor, &param);
+  return pc;
+}
+
+static void _mapcache_memcache_release_conn(mapcache_context *ctx, mapcache_pooled_connection *con) {
+  mapcache_connection_pool_release_connection(ctx, con);
+}
+
 void mapcache_locker_memcache_parse_xml(mapcache_context *ctx, mapcache_locker *self, ezxml_t doc) {
   mapcache_locker_memcache *lm = (mapcache_locker_memcache*)self;
   ezxml_t node,server_node;
@@ -296,35 +351,7 @@ static char* memcache_key_for_resource(mapcache_context *ctx, mapcache_locker_me
   return apr_psprintf(ctx->pool,"%s"MAPCACHE_LOCKFILE_PREFIX"%s.lck",lm->key_prefix?lm->key_prefix:"",saferes);
 }
 
-apr_memcache_t* create_memcache(mapcache_context *ctx, mapcache_locker_memcache *lm) {
-  apr_status_t rv;
-  apr_memcache_t *memcache;
-  char errmsg[120];
-  int i;
-  if(APR_SUCCESS != apr_memcache_create(ctx->pool, lm->nservers, 0, &memcache)) {
-    ctx->set_error(ctx,500,"memcache locker: failed to create memcache backend");
-    return NULL;
-  }
-
-  for(i=0;i<lm->nservers;i++) {
-    apr_memcache_server_t *server;
-    rv = apr_memcache_server_create(ctx->pool,lm->servers[i].host,lm->servers[i].port,1,1,1,10000,&server);
-    if(APR_SUCCESS != rv) {
-      ctx->set_error(ctx,500,"memcache locker: failed to create server %s:%d: %s",lm->servers[i].host,lm->servers[i].port, apr_strerror(rv,errmsg,120));
-      return NULL;
-    }
-
-    rv = apr_memcache_add_server(memcache,server);
-    if(APR_SUCCESS != rv) {
-      ctx->set_error(ctx,500,"memcache locker: failed to add server %s:%d: %s",lm->servers[i].host,lm->servers[i].port, apr_strerror(rv,errmsg,120));
-      return NULL;
-    }
-  }
-  return memcache;
-}
-
 typedef struct {
-  apr_memcache_t *memcache;
   char *lockname;
 } mapcache_lock_memcache;
 
@@ -333,9 +360,18 @@ mapcache_lock_result mapcache_locker_memcache_ping_lock(mapcache_context *ctx, m
   char *one;
   size_t ione;
   mapcache_lock_memcache *mlock = (mapcache_lock_memcache*)lock;
-  if(!mlock || !mlock->lockname || !mlock->memcache)
+  mapcache_pooled_connection *pc;
+  struct mapcache_memcache_pooled_connection *mpc;
+  if(!mlock || !mlock->lockname) {
     return MAPCACHE_LOCK_NOENT;
-  rv = apr_memcache_getp(mlock->memcache,ctx->pool,mlock->lockname,&one,&ione,NULL);
+  }
+  pc = _mapcache_memcache_get_conn(ctx,(mapcache_locker_memcache*)self);
+  if(GC_HAS_ERROR(ctx)) {
+    return MAPCACHE_LOCK_NOENT;
+  }
+  mpc = pc->connection;
+  rv = apr_memcache_getp(mpc->memcache,ctx->pool,mlock->lockname,&one,&ione,NULL);
+  _mapcache_memcache_release_conn(ctx,pc);
   if(rv == APR_SUCCESS)
     return MAPCACHE_LOCK_LOCKED;
   else
@@ -348,13 +384,20 @@ mapcache_lock_result mapcache_locker_memcache_aquire_lock(mapcache_context *ctx,
   mapcache_locker_memcache *lm = (mapcache_locker_memcache*)self;
   char errmsg[120];
   mapcache_lock_memcache *mlock = apr_pcalloc(ctx->pool, sizeof(mapcache_lock_memcache));
+  mapcache_pooled_connection *pc;
+  struct mapcache_memcache_pooled_connection *mpc;
   mlock->lockname = memcache_key_for_resource(ctx, lm, resource);
-  mlock->memcache = create_memcache(ctx,lm);
   if(GC_HAS_ERROR(ctx)) {
     return MAPCACHE_LOCK_NOENT;
   }
+  pc = _mapcache_memcache_get_conn(ctx,lm);
+  if(GC_HAS_ERROR(ctx)) {
+    return MAPCACHE_LOCK_NOENT;
+  }
+  mpc = pc->connection;
   *lock = mlock;
-  rv = apr_memcache_add(mlock->memcache,mlock->lockname,"1",1,self->timeout,0);
+  rv = apr_memcache_add(mpc->memcache,mlock->lockname,"1",1,self->timeout,0);
+  _mapcache_memcache_release_conn(ctx,pc);
   if( rv == APR_SUCCESS) {
     return MAPCACHE_LOCK_AQUIRED;
   } else if ( rv == APR_EEXIST ) {
@@ -369,12 +412,19 @@ void mapcache_locker_memcache_release_lock(mapcache_context *ctx, mapcache_locke
   apr_status_t rv;
   mapcache_lock_memcache *mlock = (mapcache_lock_memcache*)lock;
   char errmsg[120];
-  if(!mlock || !mlock->memcache || !mlock->lockname) {
+  mapcache_pooled_connection *pc;
+  struct mapcache_memcache_pooled_connection *mpc;
+  if(!mlock || !mlock->lockname) {
     /*error*/
     return;
   }
 
-  rv = apr_memcache_delete(mlock->memcache,mlock->lockname,0);
+  pc = _mapcache_memcache_get_conn(ctx,(mapcache_locker_memcache*)self);
+  if(GC_HAS_ERROR(ctx))
+    return;
+  mpc = pc->connection;
+  rv = apr_memcache_delete(mpc->memcache,mlock->lockname,0);
+  _mapcache_memcache_release_conn(ctx,pc);
   if(rv != APR_SUCCESS && rv!= APR_NOTFOUND) {
     ctx->set_error(ctx,500,"memcache: failed to delete key %s: %s", mlock->lockname, apr_strerror(rv,errmsg,120));
   }
